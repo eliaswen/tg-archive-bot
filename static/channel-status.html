@@ -1,0 +1,22 @@
+<h2>$${{channel_name}}</h2>
+<dl>
+    <dt>Channel ID</dt><dd>$${{channel_id}}</dd>
+    <dt>Server</dt><dd><a href="/servers/$${{server_id}}">$${{server_name}}</a></dd>
+    <dt>Messages</dt><dd>$${{message_count}}</dd>
+    <dt>Observed users</dt><dd>$${{user_count}}</dd>
+    <dt>Message versions</dt><dd>$${{version_count}}</dd>
+    <dt>Archived data</dt><dd>$${{total_storage}}</dd>
+    <dt>Message content</dt><dd>$${{message_storage}}</dd>
+    <dt>Attachments</dt><dd>$${{attachment_storage}}</dd>
+</dl>
+<form method="get" action="/channels/$${{channel_id}}/messages">
+    <button type="submit">View messages in this channel</button>
+</form>
+<h3>Known names</h3>
+<ul>
+$${{names}}
+</ul>
+<h3>Observed users</h3>
+<ul>
+$${{users}}
+</ul>

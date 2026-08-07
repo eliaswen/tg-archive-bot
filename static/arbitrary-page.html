@@ -1,0 +1,5 @@
+<form method="post" action="$${{action}}">
+    <input type="hidden" name="search" value="$${{search}}">
+$${{additional_fields}}    <label>Page <input type="number" name="page" min="1" max="$${{total_pages}}" required></label>
+    <button type="submit">Go</button>
+</form>

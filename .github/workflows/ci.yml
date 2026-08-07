@@ -1,0 +1,222 @@
+name: CI and release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgres://postgres:postgres@postgres:5432/tg_archive_bot
+  DISCORD_TOKEN: testing
+  SQLX_OFFLINE: true
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tg_archive_bot
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev
+
+      - name: Set up Rust
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --silent --show-error --fail \
+              https://sh.rustup.rs --output /tmp/rustup-init.sh
+            sh /tmp/rustup-init.sh -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Run tests
+        run: cargo test --verbose
+
+  release_metadata:
+    name: Detect release commit
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      is_release: ${{ steps.release_commit.outputs.is_release }}
+      version: ${{ steps.release_commit.outputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect release commit
+        id: release_commit
+        shell: bash
+        run: |
+          subject="$(git log -1 --pretty=%s)"
+          echo "is_release=false" >> "$GITHUB_OUTPUT"
+
+          if [[ "$subject" =~ ^Release\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+            echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          fi
+
+  container:
+    name: Build and publish container
+    needs: release_metadata
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Gitea Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: git.ewenlau.net
+          username: ${{ secrets.GIT_USERNAME }}
+          password: ${{ secrets.GIT_PASSWORD }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: git.ewenlau.net/${{ secrets.GIT_USERNAME }}/tg-archive-bot
+          tags: |
+            type=raw,value=dev
+            type=raw,value=${{ needs.release_metadata.outputs.version }},enable=${{ needs.release_metadata.outputs.is_release == 'true' }}
+            type=raw,value=latest,enable=${{ needs.release_metadata.outputs.is_release == 'true' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  release:
+    name: Create release
+    needs: [release_metadata, container]
+    if: success() && needs.release_metadata.outputs.is_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate linked release notes
+        env:
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          previous_tag="$(
+            git tag --merged HEAD^ --sort=-version:refname \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              | head -n 1 || true
+          )"
+
+          if [[ -n "$previous_tag" ]]; then
+            range="${previous_tag}..HEAD"
+            heading="## Commits since ${previous_tag}"
+          else
+            range="HEAD"
+            heading="## Commits"
+          fi
+
+          echo "$heading" > release-notes.md
+          echo >> release-notes.md
+          while IFS=$'\t' read -r sha subject; do
+            short_sha="${sha:0:7}"
+            printf -- '- [`%s`](%s/%s/commit/%s) %s\n' \
+              "$short_sha" "$SERVER_URL" "$REPOSITORY" "$sha" "$subject"
+          done < <(git log --reverse --pretty=tformat:'%H%x09%s' "$range") \
+            >> release-notes.md
+
+      - name: Publish release
+        env:
+          API_URL: ${{ github.api_url }}
+          REPOSITORY: ${{ github.repository }}
+          RELEASE_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          VERSION: ${{ needs.release_metadata.outputs.version }}
+        shell: bash
+        run: |
+          release_url="${API_URL}/repos/${REPOSITORY}/releases/tags/${VERSION}"
+          status="$(
+            curl --silent --show-error \
+              --output existing-release.json \
+              --write-out '%{http_code}' \
+              --header "Authorization: token ${RELEASE_TOKEN}" \
+              "$release_url"
+          )"
+
+          if [[ "$status" == "200" ]]; then
+            echo "Release ${VERSION} already exists; nothing to do."
+            exit 0
+          fi
+
+          if [[ "$status" != "404" ]]; then
+            cat existing-release.json >&2
+            exit 1
+          fi
+
+          jq --null-input \
+            --arg tag_name "$VERSION" \
+            --arg name "Release $VERSION" \
+            --arg target_commitish "$GITHUB_SHA" \
+            --rawfile body release-notes.md \
+            '{
+              tag_name: $tag_name,
+              target_commitish: $target_commitish,
+              name: $name,
+              body: $body,
+              draft: false,
+              prerelease: false
+            }' > release.json
+
+          status="$(
+            curl --silent --show-error \
+              --output created-release.json \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: token ${RELEASE_TOKEN}" \
+              --header "Content-Type: application/json" \
+              --data @release.json \
+              "${API_URL}/repos/${REPOSITORY}/releases"
+          )"
+
+          if [[ "$status" != "201" ]]; then
+            cat created-release.json >&2
+            exit 1
+          fi

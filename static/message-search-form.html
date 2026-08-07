@@ -1,0 +1,10 @@
+<form method="post" action="$${{action}}">
+    <label>Search messages: <input type="search" name="search" value="$${{search}}"></label>
+    <label>Search by:
+        <select name="search_by">
+            <option value="content"$${{content_selected}}>Content</option>
+            <option value="timestamp"$${{timestamp_selected}}>Timestamp</option>
+        </select>
+    </label>
+    <button type="submit">Search</button>
+</form>
