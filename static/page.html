@@ -1,23 +1,40 @@
 <!doctype html>
-<html lang="en">
+<html class="theme-{{theme}}" lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>$${{title}} — TG Archive</title>
+    <title>{{ title }} - TG Archive</title>
+    <link rel="stylesheet" href="/theme.css">
 </head>
 <body>
-    <header>
-        <h1>TG Archive</h1>
-        <nav>
+    <header class="site-header">
+        <strong class="site-brand">TG Archive</strong>
+{% if logged_in %}        <nav class="site-navigation">
             <a href="/">Home</a> |
             <a href="/servers">Servers</a> |
             <a href="/channels">Channels</a> |
             <a href="/users">Users</a> |
-            <a href="/messages">Messages</a>
-        </nav>
+            <a href="/messages">Messages</a> |
+            <form method="post" action="/logout"><button type="submit">Log out</button></form>
+        </nav>{% endif %}
     </header>
-    <main>
-$${{body}}
+    <main class="page-content">
+{{ body|safe }}
     </main>
+    <footer class="site-footer">
+        <p class="footer-legal">Source code available <a href="https://git.ewenlau.net/ewenlau/tg-archive-bot">here</a>.<br>
+            Copyright © 2026 Ewi and contributors<br>
+            This content is licensed under GPL-3.0.</p>
+        <form class="footer-theme" method="post" action="/theme">
+            <label>Theme
+                <select name="theme">
+                    <option value="white"{% if theme == "white" %} selected{% endif %}>White</option>
+                    <option value="black"{% if theme == "black" %} selected{% endif %}>Black</option>
+                    <option value="oled"{% if theme == "oled" %} selected{% endif %}>OLED</option>
+                </select>
+            </label>
+            <button type="submit">Apply</button>
+        </form>
+    </footer>
 </body>
 </html>

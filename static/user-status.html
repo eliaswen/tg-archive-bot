@@ -1,30 +1,31 @@
-<h2>$${{username}}</h2>
+<h2>{{username}}</h2>
+<p>You can see this user because they have messages in a channel where {{access_reason}}.</p>
 <dl>
-    <dt>User ID</dt><dd>$${{user_id}}</dd>
-    <dt>Messages</dt><dd>$${{message_count}}</dd>
-    <dt>Servers</dt><dd>$${{server_count}}</dd>
-    <dt>Channels</dt><dd>$${{channel_count}}</dd>
-    <dt>Message versions</dt><dd>$${{version_count}}</dd>
-    <dt>Archived data</dt><dd>$${{total_storage}}</dd>
-    <dt>Message content</dt><dd>$${{message_storage}}</dd>
-    <dt>Attachments</dt><dd>$${{attachment_storage}}</dd>
+    <dt>User ID</dt><dd>{{user_id}}</dd>
+    <dt>Messages</dt><dd>{{message_count}}</dd>
+    <dt>Servers</dt><dd>{{server_count}}</dd>
+    <dt>Channels</dt><dd>{{channel_count}}</dd>
+    <dt>Message versions</dt><dd>{{version_count}}</dd>
+    <dt>Archived data</dt><dd>{{total_storage}}</dd>
+    <dt>Message content</dt><dd>{{message_storage}}</dd>
+    <dt>Attachments</dt><dd>{{attachment_storage}}</dd>
 </dl>
-<form method="get" action="/users/$${{user_id}}/messages">
+<form method="get" action="/users/{{user_id}}/messages">
     <button type="submit">View messages by this user</button>
 </form>
 <h3>Known usernames</h3>
 <ul>
-$${{names}}
+{{names|safe}}
 </ul>
 <h3>Known avatars</h3>
 <ul>
-$${{avatars}}
+{{avatars|safe}}
 </ul>
 <h3>Servers</h3>
 <ul>
-$${{servers}}
+{{servers|safe}}
 </ul>
 <h3>Channels</h3>
 <ul>
-$${{channels}}
+{{channels|safe}}
 </ul>

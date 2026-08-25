@@ -1,9 +1,9 @@
 <nav aria-label="Message versions">
-    <p>Version $${{current_version}} of $${{version_count}} — archived $${{archived_at}}</p>
+    <p>Version {{current_version}} of {{version_count}} - archived {{archived_at}}</p>
     <p>
-$${{previous_version}}$${{next_version}}    </p>
-    <form method="get" action="/messages/$${{message_id}}">
-        <label>Version <input type="number" name="version" min="1" max="$${{version_count}}" value="$${{current_version}}" required></label>
+{{previous_version|safe}}{{next_version|safe}}    </p>
+    <form method="get" action="/messages/{{message_id}}">
+        <label>Version <input type="number" name="version" min="1" max="{{version_count}}" value="{{current_version}}" required></label>
         <button type="submit">View version</button>
     </form>
 </nav>

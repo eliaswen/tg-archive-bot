@@ -12,7 +12,6 @@ pub struct Data {
     pub pool: sqlx::PgPool,
 }
 
-// Define standard types for Poise context, commands, and errors.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
@@ -37,7 +36,6 @@ async fn main() {
 
     trace!("Env loaded");
 
-    // Grab envs
     trace!("Loading database url");
     let database_url =
         env::var("TG_BOT_DATABASE_URL").expect("Expected a database url in the environment");
@@ -51,9 +49,15 @@ async fn main() {
     let web_address = env::var("TG_BOT_WEB_ADDRESS").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
     trace!("Web address loaded");
 
+    let discord_client_id = env::var("TG_BOT_DISCORD_CLIENT_ID")
+        .expect("Expected a Discord client ID in the environment");
+    let discord_client_secret = env::var("TG_BOT_DISCORD_CLIENT_SECRET")
+        .expect("Expected a Discord client secret in the environment");
+    let discord_redirect_uri = env::var("TG_BOT_DISCORD_REDIRECT_URI")
+        .expect("Expected a Discord redirect URI in the environment");
+
     info!("Starting bot...");
 
-    // Initialize database
     debug!("Initalizing database");
     let pool = connect_database(&database_url)
         .await
@@ -71,7 +75,14 @@ async fn main() {
     let web_listener = tokio::net::TcpListener::bind(&web_address)
         .await
         .expect("Failed to bind web server");
-    tokio::spawn(web::run(web_listener, pool.clone()));
+    tokio::spawn(web::run(
+        web_listener,
+        pool.clone(),
+        token.clone(),
+        discord_client_id,
+        discord_client_secret,
+        discord_redirect_uri,
+    ));
     debug!("Web server started");
 
     trace!("Loading intents");
@@ -102,7 +113,12 @@ async fn main() {
                     }
                 })
             },
-            commands: vec![commands::ping(), commands::version(), commands::git()],
+            commands: vec![
+                commands::ping(),
+                commands::version(),
+                commands::git(),
+                commands::stats(),
+            ],
             ..Default::default()
         })
         .setup(|ctx, _ready, framework| {
@@ -171,5 +187,12 @@ async fn connect_database(database_url: &str) -> Result<sqlx::PgPool, Error> {
 }
 
 fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
+    let mut escaped = String::with_capacity(identifier.len());
+    for character in identifier.chars() {
+        escaped.push(character);
+        if character == '"' {
+            escaped.push(character);
+        }
+    }
+    format!("\"{}\"", escaped)
 }

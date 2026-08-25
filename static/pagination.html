@@ -1,10 +1,10 @@
 <nav aria-label="Pages">
     <p>
-$${{first_pages}}
+{{first_pages|safe}}
     </p>
-$${{arbitrary_page}}
+{{arbitrary_page|safe}}
     <p>
-$${{final_pages}}
+{{final_pages|safe}}
     </p>
-    <p>Page $${{current_page}} of $${{total_pages}}</p>
+    <p>Page {{current_page}} of {{total_pages}}</p>
 </nav>

@@ -1,5 +1,6 @@
-<form method="post" action="$${{action}}">
-    <input type="hidden" name="search" value="$${{search}}">
-$${{additional_fields}}    <label>Page <input type="number" name="page" min="1" max="$${{total_pages}}" required></label>
+<form method="post" action="{{action}}">
+    <input type="hidden" name="search" value="{{search}}">
+{% if let Some(search_by) = search_by %}    <input type="hidden" name="search_by" value="{{search_by}}">
+{% endif %}    <label>Page <input type="number" name="page" min="1" max="{{total_pages}}" required></label>
     <button type="submit">Go</button>
 </form>

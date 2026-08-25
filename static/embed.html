@@ -1,1 +1,1 @@
-<li>$${{title}}$${{description}}$${{url}}</li>
+<li>{% if let Some(value) = title %}<strong>{{value}}</strong>{% endif %}{% if let Some(value) = description %}<pre>{{value}}</pre>{% endif %}{% if let Some(value) = url %}<a href="{{value}}">{{value}}</a>{% endif %}</li>

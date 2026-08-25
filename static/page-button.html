@@ -1,4 +1,5 @@
-<form method="post" action="$${{action}}">
-    <input type="hidden" name="search" value="$${{search}}">
-$${{additional_fields}}    <button type="submit" name="page" value="$${{page_number}}">$${{label}}</button>
+<form method="post" action="{{action}}">
+    <input type="hidden" name="search" value="{{search}}">
+{% if let Some(search_by) = search_by %}    <input type="hidden" name="search_by" value="{{search_by}}">
+{% endif %}    <button type="submit" name="page" value="{{page_number}}">{{label}}</button>
 </form>

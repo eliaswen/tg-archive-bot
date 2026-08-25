@@ -1,7 +1,7 @@
-<h2>$${{title}}</h2>
-$${{search_form}}
-<p>$${{item_count}} $${{item_name}} found.</p>
+<h2>{{title}}</h2>
+{{search_form|safe}}
+<p>{{item_count}} {{item_name}} found.</p>
 <ul>
-$${{items}}
+{{items|safe}}
 </ul>
-$${{pagination}}
+{{pagination|safe}}

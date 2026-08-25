@@ -1,1 +1,1 @@
-<li><a href="/attachments/$${{attachment_id}}?version=$${{message_version}}" target="_blank">View $${{filename}}</a> — $${{size}} bytes$${{content_type}}$${{description}}</li>
+<li><a href="/attachments/{{attachment_id}}?version={{message_version}}" target="_blank">View {{filename}}</a> - {{size}} bytes{% if let Some(value) = content_type %} - {{value}}{% endif %}{% if let Some(value) = description %} - {{value}}{% endif %}</li>

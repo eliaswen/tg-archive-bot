@@ -31,6 +31,9 @@ services:
       - postgres
     environment:
       TG_BOT_DISCORD_TOKEN: YOUR_DISCORD_TOKEN_HERE
+      TG_BOT_DISCORD_CLIENT_ID: YOUR_DISCORD_CLIENT_ID_HERE
+      TG_BOT_DISCORD_CLIENT_SECRET: YOUR_DISCORD_CLIENT_SECRET_HERE
+      TG_BOT_DISCORD_REDIRECT_URI: http://localhost:3000/login/discord/callback
       TG_BOT_DATABASE_URL: postgres://postgres:YOUR_POSTGRES_PASSWORD_HERE@postgres:5432/tg_archive_bot
       TG_BOT_LOG: info
       TG_BOT_WEB_ADDRESS: 0.0.0.0:3000
