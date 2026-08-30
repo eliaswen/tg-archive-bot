@@ -12,7 +12,7 @@ pub async fn stats(ctx: Context<'_>) -> Result<(), Error> {
     );
     let stats = web::archive_stats(&ctx.data().pool).await?;
     let msg = format!(
-        "# Archive Statistics\n## Messages\nArchived messages: {}\nArchived users: {}\nChannels: {}\nServers: {}\n## Storage usage\nTotal archive: {}\nMessages and metadata: {}\nAttachments: {}",
+        "# Archive Statistics\n## Messages\nArchived messages: {}\nArchived users: {}\nChannels: {}\nServers: {}\n## Storage usage\nArchived data: {}\nMessage content: {}\nAttachments: {}",
         stats.messages,
         stats.users,
         stats.channels,

@@ -1072,32 +1072,14 @@ pub async fn archive_stats(pool: &PgPool) -> Result<ArchiveStats, sqlx::Error> {
              (SELECT COUNT(*) FROM discord_users),
              (SELECT COUNT(*) FROM guilds),
              (SELECT COUNT(*) FROM channels),
-             pg_total_relation_size('guilds')
-                 + pg_total_relation_size('channels')
-                 + pg_total_relation_size('discord_users')
-                 + pg_total_relation_size('discord_roles')
-                 + pg_total_relation_size('messages')
-                 + pg_total_relation_size('message_versions')
-                 + pg_total_relation_size('attachments')
-                 + pg_total_relation_size('embeds')
-                 + pg_total_relation_size('embed_fields')
-                 + pg_total_relation_size('guild_history')
-                 + pg_total_relation_size('channel_history')
-                 + pg_total_relation_size('discord_user_history')
-                 + pg_total_relation_size('guild_users'),
-             pg_total_relation_size('messages')
-                 + pg_total_relation_size('message_versions')
-                 + pg_total_relation_size('guilds')
-                 + pg_total_relation_size('channels')
-                 + pg_total_relation_size('discord_users')
-                 + pg_total_relation_size('discord_roles')
-                 + pg_total_relation_size('embeds')
-                 + pg_total_relation_size('embed_fields')
-                 + pg_total_relation_size('guild_history')
-                 + pg_total_relation_size('channel_history')
-                 + pg_total_relation_size('discord_user_history')
-                 + pg_total_relation_size('guild_users'),
-             pg_total_relation_size('attachments');",
+             (SELECT COALESCE(SUM(OCTET_LENGTH(content)), 0)
+              FROM message_versions)
+                 + (SELECT COALESCE(SUM(OCTET_LENGTH(data)), 0)
+                    FROM attachments),
+             (SELECT COALESCE(SUM(OCTET_LENGTH(content)), 0)
+              FROM message_versions),
+             (SELECT COALESCE(SUM(OCTET_LENGTH(data)), 0)
+              FROM attachments);",
     )
     .fetch_one(pool)
     .await?;
