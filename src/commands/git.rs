@@ -13,7 +13,7 @@ pub async fn git(ctx: Context<'_>) -> Result<(), Error> {
 
     let response = ctx.say("Processing...").await?;
 
-    let msg = "Git repo: https://git.ewenlau.net/ewenlau/tg-archive\nIf you'd like to contribute, contact <@1389325880853270569> to get an account.";
+    let msg = "Git repo: https://git.ewenlau.net/ewenlau/tg-archive-bot\nIf you'd like to contribute, contact <@1389325880853270569> to get an account.";
     edit_response_message(&response, ctx, msg, true).await?;
     trace_message(
         msg,
