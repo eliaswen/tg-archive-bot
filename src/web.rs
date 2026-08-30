@@ -12,6 +12,7 @@ use rand::{Rng, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, cookie::time::Duration};
 use tracing::{error, info};
 
@@ -21,6 +22,7 @@ tokio::task_local! {
 
 const ITEMS_PER_PAGE: i64 = 100;
 const SHOWN_PAGES: i64 = 10;
+const CHANNEL_ACCESS_TTL_SECONDS: u64 = 5 * 60;
 
 #[derive(Clone)]
 struct WebData {
@@ -38,6 +40,8 @@ struct WebUser {
     username: String,
     channel_ids: Vec<i64>,
     channel_access: Vec<ChannelAccess>,
+    #[serde(default)]
+    channel_access_refreshed_at: u64,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -603,7 +607,26 @@ async fn require_user(
     next: Next,
 ) -> Response {
     match session.get::<WebUser>("user").await {
-        Ok(Some(user)) => {
+        Ok(Some(mut user)) => {
+            if channel_access_needs_refresh(&user, request.uri().path()) {
+                let channel_access = match accessible_channels(&data, user.id).await {
+                    Ok(channel_access) => channel_access,
+                    Err(error) => {
+                        error!("Discord permission refresh failed: {}", error);
+                        return StatusCode::BAD_GATEWAY.into_response();
+                    }
+                };
+                user.channel_ids = channel_access
+                    .iter()
+                    .map(|access| access.channel_id)
+                    .collect();
+                user.channel_access = channel_access;
+                user.channel_access_refreshed_at = unix_timestamp();
+                if let Err(error) = session.insert("user", &user).await {
+                    error!("Could not update refreshed session permissions: {}", error);
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            }
             if !request_is_allowed(&data.pool, &user, request.uri().path()).await {
                 return StatusCode::NOT_FOUND.into_response();
             }
@@ -616,6 +639,34 @@ async fn require_user(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn channel_access_needs_refresh_at(user: &WebUser, path: &str, now: u64) -> bool {
+    let expired =
+        now.saturating_sub(user.channel_access_refreshed_at) >= CHANNEL_ACCESS_TTL_SECONDS;
+    let requested_channel_is_missing = path
+        .trim_matches('/')
+        .split('/')
+        .collect::<Vec<_>>()
+        .as_slice()
+        .get(0..2)
+        .and_then(|parts| match parts {
+            ["channels", id] => id.parse::<i64>().ok(),
+            _ => None,
+        })
+        .is_some_and(|channel_id| !user.channel_ids.contains(&channel_id));
+    expired || requested_channel_is_missing
+}
+
+fn channel_access_needs_refresh(user: &WebUser, path: &str) -> bool {
+    channel_access_needs_refresh_at(user, path, unix_timestamp())
 }
 
 async fn request_is_allowed(pool: &PgPool, user: &WebUser, path: &str) -> bool {
@@ -801,6 +852,7 @@ async fn discord_callback(
         username: user.username,
         channel_ids,
         channel_access,
+        channel_access_refreshed_at: unix_timestamp(),
     };
     if session.cycle_id().await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
@@ -2635,6 +2687,44 @@ mod tests {
         assert_eq!(Theme::from_cookie(Some("black")).as_str(), "black");
         assert_eq!(Theme::from_cookie(Some("oled")).as_str(), "oled");
         assert_eq!(Theme::from_cookie(Some("unknown")).as_str(), "white");
+    }
+
+    #[test]
+    fn refreshes_expired_or_legacy_channel_access() {
+        let mut user = WebUser {
+            id: 1,
+            username: "user".into(),
+            channel_ids: vec![10],
+            channel_access: Vec::new(),
+            channel_access_refreshed_at: 1_000,
+        };
+
+        assert!(!channel_access_needs_refresh_at(&user, "/channels", 1_299));
+        assert!(channel_access_needs_refresh_at(&user, "/channels", 1_300));
+        user.channel_access_refreshed_at = 0;
+        assert!(channel_access_needs_refresh_at(&user, "/channels", 1_000));
+    }
+
+    #[test]
+    fn refreshes_when_a_directly_requested_channel_is_not_cached() {
+        let user = WebUser {
+            id: 1,
+            username: "user".into(),
+            channel_ids: vec![10],
+            channel_access: Vec::new(),
+            channel_access_refreshed_at: 1_000,
+        };
+
+        assert!(!channel_access_needs_refresh_at(
+            &user,
+            "/channels/10/messages",
+            1_001
+        ));
+        assert!(channel_access_needs_refresh_at(
+            &user,
+            "/channels/20/messages",
+            1_001
+        ));
     }
 
     #[test]
