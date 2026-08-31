@@ -10,7 +10,7 @@ pub async fn event_handler(
 ) -> Result<(), Error> {
     match event {
         sere::FullEvent::Message { new_message } => {
-            crate::message_archive::record_message(ctx, new_message, &user_data.pool).await?;
+            super::message_archive::record_message(ctx, new_message, &user_data.pool).await?;
         }
         sere::FullEvent::MessageUpdate {
             old_if_available,
@@ -43,7 +43,7 @@ pub async fn event_handler(
                 message = event.channel_id.message(ctx, event.id).await?;
             }
 
-            crate::message_archive::record_message_edit(ctx, &message, &user_data.pool).await?;
+            super::message_archive::record_message_edit(ctx, &message, &user_data.pool).await?;
         }
         sere::FullEvent::MessageDelete {
             deleted_message_id, ..

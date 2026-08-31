@@ -1,4 +1,4 @@
-use crate::messaging::{edit_response_message, trace_message};
+use crate::bot::messaging::{edit_response_message, trace_message};
 use crate::{Context, Error};
 use tracing::debug;
 

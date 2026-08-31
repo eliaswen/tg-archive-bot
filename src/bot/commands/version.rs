@@ -1,4 +1,4 @@
-use crate::messaging::trace_message;
+use crate::bot::messaging::{trace_message, edit_response_message};
 use crate::{Context, Error};
 use tracing::{debug, trace};
 
@@ -13,6 +13,7 @@ pub async fn version(ctx: Context<'_>) -> Result<(), Error> {
         ctx.guild_id().unwrap().get()
     );
     trace!("Loading embedded version information");
+    let response = ctx.say("Processing...").await?;
     let msg = format!("Current version:\n{VERSION}");
     trace_message(
         &msg,
@@ -20,7 +21,7 @@ pub async fn version(ctx: Context<'_>) -> Result<(), Error> {
         ctx.guild_id().unwrap().to_string(),
     )
     .await;
-    ctx.say(msg).await?;
+    edit_response_message(&response, ctx, &msg, true).await?;
     debug!(
         "Version command performed for user {} with version information",
         ctx.author().name

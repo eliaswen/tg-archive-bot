@@ -1,4 +1,4 @@
-use crate::messaging::trace_message;
+use crate::bot::messaging::trace_message;
 use crate::{Context, Error};
 use poise::serenity_prelude as sere;
 use tracing::{debug, trace};

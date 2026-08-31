@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title }} - TG Archive</title>
     <link rel="stylesheet" href="/theme.css">
+{% if detect_timezone %}    <script src="/timezone.js" defer></script>
+{% endif %}
 </head>
 <body>
     <header class="site-header">
@@ -22,7 +24,8 @@
 {{ body|safe }}
     </main>
     <footer class="site-footer">
-        <p class="footer-legal">Source code available <a href="https://git.ewenlau.net/ewenlau/tg-archive-bot">here</a>.<br>
+        <p class="footer-legal">{% if logged_in %}<a href="/privacy">Privacy</a><br>{% endif %}
+            Source code available <a href="https://git.ewenlau.net/ewenlau/tg-archive-bot">here</a>.<br>
             Copyright © 2026 Ewi and contributors<br>
             This content is licensed under GPL-3.0.</p>
         <form class="footer-theme" method="post" action="/theme">

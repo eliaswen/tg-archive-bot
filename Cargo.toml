@@ -1,6 +1,6 @@
 [package]
 name = "tg-archive-bot"
-version = "0.2.3"
+version = "0.2.3-dev"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Bot for archiving messages in TeenGovernment and related servers"
@@ -13,8 +13,12 @@ homepage = "https://git.ewenlau.net/ewenlau/tg-archive-bot"
 askama = "0.14"
 axum = { version = "0.8.4", features = ["form"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
+chrono = "0.4"
+chrono-tz = "0.10"
 dotenv = "0.15.0"
+ipnet = "2.12.1"
 poise = "0.6.2"
+pulldown-cmark = "0.13.4"
 rand = "0.9"
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }

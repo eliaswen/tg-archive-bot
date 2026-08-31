@@ -1,0 +1,20 @@
+{% if logged_in %}
+
+<h2>Privacy</h2>
+<p>This app collects substantial Discord API data, including messages, user information, and server data.</p>
+<p>Per Discord's terms of service and the GDPR, you are entitled to access, update, or delete your personal information.</p>
+<p>This button allows you to anonymize all your data in the app. Message content and metadata (such as timestamps) will be kept, but your association to them will be removed.</p>
+<p>More precisely, all your messages will be linked to a generic, anonymous user ID, common for all deleted users, and your user account entry will be removed. Keep in mind that this only applies to past data; future data will not be affected until you choose to anonymize it.</p>
+
+<form method="get" action="/privacy/anonymize">
+    <button type="submit">Anonymize all</button>
+</form>
+
+<p>
+If you need further privacy assistance, such as full access or deletion of your data, please send an email to <a href="mailto:tg-archive-privacy@mail.ewenlau.net">tg-archive-privacy@mail.ewenlau.net</a>. Per GDPR regulation, you will receive a response within one month. If you do not receive a response, please check your spam folder or contact me again.
+</p>
+
+<p>For more information about what data is collected, and how it is used, please refer to the privacy policy.</p>
+<p>The full privacy policy can be found <a href="/privacy-policy">here</a>.</p>
+
+{% endif %}

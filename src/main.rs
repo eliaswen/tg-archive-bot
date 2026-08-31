@@ -2,11 +2,9 @@ use poise::serenity_prelude as sere;
 use std::env;
 use tracing::{debug, error, info, trace};
 use tracing_subscriber::EnvFilter;
-pub mod commands;
-pub mod event_handler;
-pub mod message_archive;
-pub mod messaging;
-pub mod web;
+mod archive_stats;
+mod bot;
+mod web;
 
 pub struct Data {
     pub pool: sqlx::PgPool,
@@ -95,7 +93,7 @@ async fn main() {
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             event_handler: |ctx, event, framework, user_data| {
-                Box::pin(event_handler::event_handler(
+                Box::pin(bot::event_handler::event_handler(
                     ctx, event, framework, user_data,
                 ))
             },
@@ -114,10 +112,10 @@ async fn main() {
                 })
             },
             commands: vec![
-                commands::ping(),
-                commands::version(),
-                commands::git(),
-                commands::stats(),
+                bot::commands::ping(),
+                bot::commands::version(),
+                bot::commands::git(),
+                bot::commands::stats(),
             ],
             ..Default::default()
         })
