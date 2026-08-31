@@ -1226,7 +1226,7 @@ mod tests {
         assert!(html.contains("class=\"theme-white\""));
         assert!(!html.contains("If you cannot see any messages"));
         assert!(include_str!("../../static/index.html").contains("If you cannot see any messages"));
-        assert!(html.contains("git.ewenlau.net/ewenlau/tg-archive-bot"));
+        assert!(html.contains("git.ewenlau.net/ewenlau/tg-archive"));
         assert!(html.contains("Copyright © 2026 Ewi and contributors"));
         assert!(html.contains("licensed under GPL-3.0"));
         assert!(html.contains("href=\"/privacy\""));
