@@ -1,4 +1,4 @@
-use super::{WebData, WebUser, accessible_channels};
+use super::{CHANNEL_ACCESS_TTL_SECONDS, ChannelAccess, WebData, WebUser, accessible_channels};
 use axum::{
     Extension, Json, Router,
     extract::{ConnectInfo, Path, Query, Request, State},
@@ -20,6 +20,52 @@ use tower_sessions::Session;
 
 const RESULTS_PER_PAGE: i64 = 100;
 const TOKEN_RATE_LIMIT: Duration = Duration::from_secs(5 * 60);
+
+#[derive(Clone, Default)]
+pub(super) struct ApiPermissionCache {
+    users: Arc<Mutex<HashMap<i64, (Instant, Vec<ChannelAccess>)>>>,
+}
+
+impl ApiPermissionCache {
+    fn get_at(&self, discord_id: i64, now: Instant) -> Option<Vec<ChannelAccess>> {
+        let mut users = self.users.lock().unwrap_or_else(|error| error.into_inner());
+        users.retain(|_, (refreshed_at, _)| {
+            now.saturating_duration_since(*refreshed_at).as_secs() < CHANNEL_ACCESS_TTL_SECONDS
+        });
+        users
+            .get(&discord_id)
+            .map(|(_, channel_access)| channel_access.clone())
+    }
+
+    fn get(&self, discord_id: i64) -> Option<Vec<ChannelAccess>> {
+        self.get_at(discord_id, Instant::now())
+    }
+
+    fn insert_at(&self, discord_id: i64, channel_access: Vec<ChannelAccess>, now: Instant) {
+        self.users
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(discord_id, (now, channel_access));
+    }
+
+    fn insert(&self, discord_id: i64, channel_access: Vec<ChannelAccess>) {
+        self.insert_at(discord_id, channel_access, Instant::now());
+    }
+}
+
+async fn cached_accessible_channels(
+    data: &WebData,
+    discord_id: i64,
+) -> Result<Vec<ChannelAccess>, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(channel_access) = data.api_permission_cache.get(discord_id) {
+        return Ok(channel_access);
+    }
+
+    let channel_access = accessible_channels(data, discord_id).await?;
+    data.api_permission_cache
+        .insert(discord_id, channel_access.clone());
+    Ok(channel_access)
+}
 
 #[derive(Clone)]
 pub(super) struct TokenRateLimiter {
@@ -162,9 +208,7 @@ struct MessageSummary {
 #[derive(Serialize)]
 struct SearchResponse {
     query: String,
-    page: i64,
-    per_page: i64,
-    total: i64,
+    limit: i64,
     results: Vec<MessageSummary>,
 }
 #[derive(Default, Deserialize)]
@@ -176,7 +220,54 @@ struct SearchQuery {
     #[serde(default)]
     q: String,
     page: Option<i64>,
+    limit: Option<i64>,
 }
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum MetadataType {
+    #[default]
+    Message,
+    Server,
+    Channel,
+    User,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MetadataLookup {
+    #[default]
+    MessageCount,
+    FirstMessage,
+    LastMessage,
+    AttachmentCount,
+    EmbedCount,
+    // For channels or servers
+    UserCount,
+    // For servers
+    ChannelCount,
+}
+
+impl MetadataLookup {
+    fn supports(self, metadata_type: MetadataType) -> bool {
+        match self {
+            Self::UserCount => {
+                matches!(metadata_type, MetadataType::Server | MetadataType::Channel)
+            }
+            Self::ChannelCount => matches!(metadata_type, MetadataType::Server),
+            _ => true,
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct MetadataQuery {
+    #[serde(default)]
+    mtype: MetadataType,
+    id: i64,
+    ltype: MetadataLookup,
+}
+
 pub(super) fn router(data: WebData) -> Router {
     let protected = Router::new()
         .route("/me", get(me))
@@ -186,6 +277,7 @@ pub(super) fn router(data: WebData) -> Router {
         .route("/view/user/{id}", get(view_user))
         .route("/search/timestamp", get(search_timestamp))
         .route("/search/content", get(search_content))
+        .route("/metadata", get(metadata_lookup))
         .route_layer(middleware::from_fn_with_state(
             data.clone(),
             require_api_user,
@@ -219,7 +311,7 @@ async fn require_api_user(
                 return api_error(StatusCode::INTERNAL_SERVER_ERROR, "database error");
             }
         };
-    let channel_ids = match accessible_channels(&data, discord_id).await {
+    let channel_ids = match cached_accessible_channels(&data, discord_id).await {
         Ok(access) => access
             .into_iter()
             .map(|channel| channel.channel_id)
@@ -417,45 +509,123 @@ async fn search_timestamp(
     Extension(user): Extension<ApiUser>,
     Query(query): Query<SearchQuery>,
 ) -> ApiResult<SearchResponse> {
-    search(&data, &user, query, true).await
+    search(&data, &user, &query, &query.limit.unwrap_or(100), true).await
 }
 async fn search_content(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
     Query(query): Query<SearchQuery>,
 ) -> ApiResult<SearchResponse> {
-    search(&data, &user, query, false).await
+    search(&data, &user, &query, &query.limit.unwrap_or(100), false).await
 }
 async fn search(
     data: &WebData,
     user: &ApiUser,
-    query: SearchQuery,
+    query: &SearchQuery,
+    limit: &i64,
     timestamp: bool,
 ) -> ApiResult<SearchResponse> {
-    let page = query.page.unwrap_or(1).max(1);
+    let limit = limit.max(&1);
     let pattern = format!("%{}%", query.q);
-    let total = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM messages m WHERE CASE WHEN $2 THEN m.timestamp::text ILIKE $1
-         ELSE COALESCE(m.content, '') ILIKE $1 END AND (m.channel_id = ANY($3) OR m.author_id = $4)")
-        .bind(&pattern).bind(timestamp).bind(&user.channel_ids).bind(user.discord_id)
-        .fetch_one(&data.pool).await.map_err(database)?;
+
     let results = sqlx::query_as::<_, MessageSummary>(
         "SELECT m.message_id AS discord_id, m.author_id, m.author_username, m.guild_id AS server_id,
          g.guild_name AS server_name, m.channel_id, c.channel_name, m.timestamp::text AS timestamp, m.content
-         FROM messages m JOIN guilds g ON g.guild_id = m.guild_id JOIN channels c ON c.channel_id = m.channel_id
-         WHERE CASE WHEN $2 THEN m.timestamp::text ILIKE $1 ELSE COALESCE(m.content, '') ILIKE $1 END
+         FROM messages m
+         JOIN guilds g ON g.guild_id = m.guild_id
+         JOIN channels c ON c.channel_id = m.channel_id
+         WHERE CASE
+             WHEN $2 THEN m.timestamp::text ILIKE $1
+             ELSE COALESCE(m.content, '') ILIKE $1
+         END
          AND (m.channel_id = ANY($3) OR m.author_id = $4)
-         ORDER BY m.timestamp DESC, m.message_id DESC LIMIT $5 OFFSET $6")
-        .bind(&pattern).bind(timestamp).bind(&user.channel_ids).bind(user.discord_id)
-        .bind(RESULTS_PER_PAGE).bind((page - 1) * RESULTS_PER_PAGE)
-        .fetch_all(&data.pool).await.map_err(database)?;
+         ORDER BY m.timestamp DESC, m.message_id DESC
+         LIMIT $5"
+    )
+    .bind(&pattern)
+    .bind(timestamp)
+    .bind(&user.channel_ids)
+    .bind(user.discord_id)
+    .bind(limit)
+    .fetch_all(&data.pool)
+    .await
+    .map_err(database)?;
+
     Ok(Json(SearchResponse {
-        query: query.q,
-        page,
-        per_page: RESULTS_PER_PAGE,
-        total,
+        query: query.q.clone(),
+        limit: *limit,
         results,
     }))
+}
+
+async fn metadata_lookup(
+    State(data): State<WebData>,
+    Extension(user): Extension<ApiUser>,
+    Query(query): Query<MetadataQuery>,
+) -> ApiResult<i64> {
+    if !query.ltype.supports(query.mtype) {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "metadata lookup is not supported for this type",
+        ));
+    }
+    let entity_filter = match query.mtype {
+        MetadataType::Message => "m.message_id = $1",
+        MetadataType::Server => "m.guild_id = $1",
+        MetadataType::Channel => "m.channel_id = $1",
+        MetadataType::User => "m.author_id = $1",
+    };
+    let aggregate = match query.ltype {
+        MetadataLookup::MessageCount => "COUNT(*)",
+        MetadataLookup::FirstMessage => {
+            "(ARRAY_AGG(message_id ORDER BY timestamp ASC, message_id ASC))[1]"
+        }
+        MetadataLookup::LastMessage => {
+            "(ARRAY_AGG(message_id ORDER BY timestamp DESC, message_id DESC))[1]"
+        }
+        MetadataLookup::AttachmentCount => {
+            "(SELECT COUNT(*) FROM attachments a WHERE a.message_id = visible.message_id)"
+        }
+        MetadataLookup::EmbedCount => {
+            "(SELECT COUNT(*) FROM embeds e WHERE e.message_id = visible.message_id)"
+        }
+        MetadataLookup::UserCount => "COUNT(DISTINCT author_id)",
+        MetadataLookup::ChannelCount => "COUNT(DISTINCT channel_id)",
+    };
+
+    let statement = if matches!(
+        query.ltype,
+        MetadataLookup::AttachmentCount | MetadataLookup::EmbedCount
+    ) {
+        format!(
+            "SELECT COALESCE(SUM({aggregate}), 0)::bigint FROM (
+                 SELECT m.message_id, m.author_id, m.channel_id, m.timestamp
+                 FROM messages m
+                 WHERE {entity_filter}
+                   AND (m.channel_id = ANY($2) OR m.author_id = $3)
+             ) visible"
+        )
+    } else {
+        format!(
+            "SELECT {aggregate} FROM (
+                 SELECT m.message_id, m.author_id, m.channel_id, m.timestamp
+                 FROM messages m
+                 WHERE {entity_filter}
+                   AND (m.channel_id = ANY($2) OR m.author_id = $3)
+             ) visible"
+        )
+    };
+
+    let value = sqlx::query_scalar::<_, Option<i64>>(sqlx::AssertSqlSafe(statement))
+        .bind(query.id)
+        .bind(&user.channel_ids)
+        .bind(user.discord_id)
+        .fetch_one(&data.pool)
+        .await
+        .map_err(database)?
+        .ok_or_else(not_found)?;
+
+    Ok(Json(value))
 }
 
 fn bearer_token(value: Option<&axum::http::HeaderValue>) -> Option<&str> {
@@ -548,5 +718,30 @@ mod tests {
         assert_eq!(limiter.check(ip), Ok(()));
         assert!(limiter.check(ip).is_err());
         assert_eq!(limiter.check("192.0.2.6".parse().unwrap()), Ok(()));
+    }
+
+    #[test]
+    fn caches_api_permissions_by_user_id_until_the_ttl_expires() {
+        let cache = ApiPermissionCache::default();
+        let refreshed_at = Instant::now();
+        let access = vec![ChannelAccess {
+            channel_id: 10,
+            reason: "test".into(),
+        }];
+
+        cache.insert_at(1, access, refreshed_at);
+
+        assert_eq!(
+            cache
+                .get_at(1, refreshed_at + Duration::from_secs(299))
+                .unwrap()[0]
+                .channel_id,
+            10
+        );
+        assert!(
+            cache
+                .get_at(1, refreshed_at + Duration::from_secs(300))
+                .is_none()
+        );
     }
 }

@@ -12,7 +12,7 @@ use axum::{
     routing::get,
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use rand::{Rng, distr::Alphanumeric};
+use rand::{distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +43,7 @@ struct WebData {
     client_secret: String,
     redirect_uri: String,
     token_rate_limiter: api::TokenRateLimiter,
+    api_permission_cache: api::ApiPermissionCache,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -574,6 +575,7 @@ pub async fn run(
         client_secret,
         redirect_uri,
         token_rate_limiter,
+        api_permission_cache: api::ApiPermissionCache::default(),
     };
     let archive = Router::new()
         .route("/", get(index))
