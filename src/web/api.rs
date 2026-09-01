@@ -1,4 +1,6 @@
-use super::{CHANNEL_ACCESS_TTL_SECONDS, ChannelAccess, WebData, WebUser, accessible_channels};
+use super::{
+    CHANNEL_ACCESS_TTL_SECONDS, ChannelAccess, WebData, WebUser, accessible_channels, safe_filename,
+};
 use axum::{
     Extension, Json, Router,
     extract::{ConnectInfo, Path, Query, Request, State},
@@ -7,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use rand::{Rng, distr::Alphanumeric, RngExt};
+use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -161,6 +163,28 @@ struct ChannelResponse {
 struct UserResponse {
     discord_id: i64,
     username: String,
+    avatar_url: Option<String>,
+    first_seen_at: Option<String>,
+    last_seen_at: Option<String>,
+    message_count: i64,
+    server_count: i64,
+    channel_count: i64,
+    attachment_count: i64,
+    embed_count: i64,
+    usernames: Vec<UserNameResponse>,
+    avatars: Vec<UserAvatarResponse>,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct UserNameResponse {
+    username: String,
+    first_seen_at: String,
+    last_seen_at: String,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct UserAvatarResponse {
+    url: String,
+    first_seen_at: String,
+    last_seen_at: String,
 }
 #[derive(Serialize, sqlx::FromRow)]
 struct AttachmentResponse {
@@ -206,10 +230,31 @@ struct MessageSummary {
     content: Option<String>,
 }
 #[derive(Serialize)]
+struct FilteredMessageSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    discord_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<Option<String>>,
+}
+#[derive(Serialize)]
 struct SearchResponse {
     query: String,
     limit: i64,
-    results: Vec<MessageSummary>,
+    results: Vec<FilteredMessageSummary>,
 }
 #[derive(Default, Deserialize)]
 struct VersionQuery {
@@ -221,7 +266,20 @@ struct SearchQuery {
     q: String,
     page: Option<i64>,
     limit: Option<i64>,
+    filter: Option<String>,
 }
+
+const SEARCH_FIELDS: [&str; 9] = [
+    "discord_id",
+    "author_id",
+    "author_username",
+    "server_id",
+    "server_name",
+    "channel_id",
+    "channel_name",
+    "timestamp",
+    "content",
+];
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -275,6 +333,11 @@ pub(super) fn router(data: WebData) -> Router {
         .route("/view/server/{id}", get(view_server))
         .route("/view/channel/{id}", get(view_channel))
         .route("/view/user/{id}", get(view_user))
+        // Added attachement and attachment because I make the mistake often
+        .route("/view/attachment/{id}", get(view_attachment))
+        .route("/view/attachement/{id}", get(view_attachment))
+        .route("/download/attachment/{id}", get(download_attachment))
+        .route("/download/attachement/{id}", get(download_attachment))
         .route("/search/timestamp", get(search_timestamp))
         .route("/search/content", get(search_content))
         .route("/metadata", get(metadata_lookup))
@@ -411,6 +474,71 @@ async fn view_server(
     }))
 }
 
+async fn view_attachment(
+    State(data): State<WebData>,
+    Extension(user): Extension<ApiUser>,
+    Path(id): Path<i64>,
+    Query(query): Query<VersionQuery>,
+) -> ApiResult<AttachmentResponse> {
+    let row = sqlx::query_as::<_, AttachmentResponse>(
+        "SELECT attachment_id AS discord_id, filename, description, content_type, size FROM attachments a
+         JOIN messages m ON m.message_id = a.message_id
+         WHERE a.attachment_id = $1 AND (m.channel_id = ANY($2) OR m.author_id = $3)
+           AND ($4::bigint IS NULL OR a.message_version = $4)
+         ORDER BY a.message_version DESC
+         LIMIT 1",
+    )
+    .bind(id)
+    .bind(&user.channel_ids)
+    .bind(user.discord_id)
+    .bind(query.version)
+    .fetch_optional(&data.pool)
+    .await
+    .map_err(database)?
+    .ok_or_else(not_found)?;
+    Ok(Json(row))
+}
+
+async fn download_attachment(
+    State(data): State<WebData>,
+    Extension(user): Extension<ApiUser>,
+    Path(id): Path<i64>,
+    Query(query): Query<VersionQuery>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let row = sqlx::query_as::<_, (String, Option<String>, Vec<u8>)>(
+        "SELECT a.filename, a.content_type, a.data FROM attachments a
+         JOIN messages m ON m.message_id = a.message_id
+         WHERE a.attachment_id = $1 AND (m.channel_id = ANY($2) OR m.author_id = $3)
+           AND ($4::bigint IS NULL OR a.message_version = $4)
+         ORDER BY a.message_version DESC
+         LIMIT 1",
+    )
+    .bind(id)
+    .bind(&user.channel_ids)
+    .bind(user.discord_id)
+    .bind(query.version)
+    .fetch_optional(&data.pool)
+    .await
+    .map_err(database)?
+    .ok_or_else(not_found)?;
+
+    let content_type = row
+        .1
+        .unwrap_or_else(|| "application/octet-stream".to_owned());
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", safe_filename(&row.0)),
+            ),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_owned()),
+        ],
+        row.2,
+    )
+        .into_response())
+}
+
 async fn view_channel(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -445,9 +573,66 @@ async fn view_user(
     .await
     .map_err(database)?
     .ok_or_else(not_found)?;
+    let history = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
+        "SELECT
+             (ARRAY_AGG(discord_avatar_url ORDER BY last_seen_at DESC)
+                 FILTER (WHERE discord_avatar_url IS NOT NULL))[1],
+             MIN(first_seen_at)::text,
+             MAX(last_seen_at)::text
+         FROM discord_user_history WHERE discord_id = $1",
+    )
+    .bind(id)
+    .fetch_one(&data.pool)
+    .await
+    .map_err(database)?;
+    let counts = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
+        "SELECT COUNT(DISTINCT m.message_id), COUNT(DISTINCT m.guild_id),
+                COUNT(DISTINCT m.channel_id), COUNT(DISTINCT a.uuid), COUNT(DISTINCT e.uuid)
+         FROM messages m
+         LEFT JOIN attachments a ON a.message_id = m.message_id
+         LEFT JOIN embeds e ON e.message_id = m.message_id
+         WHERE m.author_id = $1 AND (m.channel_id = ANY($2) OR m.author_id = $3)",
+    )
+    .bind(id)
+    .bind(&user.channel_ids)
+    .bind(user.discord_id)
+    .fetch_one(&data.pool)
+    .await
+    .map_err(database)?;
+    let usernames = sqlx::query_as::<_, UserNameResponse>(
+        "SELECT discord_username AS username, MIN(first_seen_at)::text AS first_seen_at,
+                MAX(last_seen_at)::text AS last_seen_at
+         FROM discord_user_history WHERE discord_id = $1
+         GROUP BY discord_username ORDER BY MIN(first_seen_at), discord_username",
+    )
+    .bind(id)
+    .fetch_all(&data.pool)
+    .await
+    .map_err(database)?;
+    let avatars = sqlx::query_as::<_, UserAvatarResponse>(
+        "SELECT discord_avatar_url AS url, MIN(first_seen_at)::text AS first_seen_at,
+                MAX(last_seen_at)::text AS last_seen_at
+         FROM discord_user_history
+         WHERE discord_id = $1 AND discord_avatar_url IS NOT NULL
+         GROUP BY discord_avatar_url ORDER BY MIN(first_seen_at), discord_avatar_url",
+    )
+    .bind(id)
+    .fetch_all(&data.pool)
+    .await
+    .map_err(database)?;
     Ok(Json(UserResponse {
         discord_id: row.0,
         username: row.1,
+        avatar_url: history.0,
+        first_seen_at: history.1,
+        last_seen_at: history.2,
+        message_count: counts.0,
+        server_count: counts.1,
+        channel_count: counts.2,
+        attachment_count: counts.3,
+        embed_count: counts.4,
+        usernames,
+        avatars,
     }))
 }
 
@@ -527,6 +712,7 @@ async fn search(
 ) -> ApiResult<SearchResponse> {
     let limit = limit.max(&1);
     let pattern = format!("%{}%", query.q);
+    let fields = parse_search_filter(query.filter.as_deref())?;
 
     let results = sqlx::query_as::<_, MessageSummary>(
         "SELECT m.message_id AS discord_id, m.author_id, m.author_username, m.guild_id AS server_id,
@@ -551,11 +737,48 @@ async fn search(
     .await
     .map_err(database)?;
 
+    let results = results
+        .into_iter()
+        .map(|result| FilteredMessageSummary {
+            discord_id: fields[0].then_some(result.discord_id),
+            author_id: fields[1].then_some(result.author_id),
+            author_username: fields[2].then_some(result.author_username),
+            server_id: fields[3].then_some(result.server_id),
+            server_name: fields[4].then_some(result.server_name),
+            channel_id: fields[5].then_some(result.channel_id),
+            channel_name: fields[6].then_some(result.channel_name),
+            timestamp: fields[7].then_some(result.timestamp),
+            content: fields[8].then_some(result.content),
+        })
+        .collect();
+
     Ok(Json(SearchResponse {
         query: query.q.clone(),
         limit: *limit,
         results,
     }))
+}
+
+fn parse_search_filter(
+    filter: Option<&str>,
+) -> Result<[bool; 9], (StatusCode, Json<ErrorResponse>)> {
+    let Some(filter) = filter else {
+        return Ok([true; 9]);
+    };
+    let mut selected = [false; 9];
+    for field in filter.split(',').map(str::trim) {
+        let Some(index) = SEARCH_FIELDS
+            .iter()
+            .position(|candidate| *candidate == field)
+        else {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "invalid search filter field",
+            ));
+        };
+        selected[index] = true;
+    }
+    Ok(selected)
 }
 
 async fn metadata_lookup(
@@ -693,6 +916,22 @@ mod tests {
         assert_eq!(bearer_token(Some(&basic)), None);
         assert_eq!(bearer_token(Some(&empty)), None);
         assert_eq!(bearer_token(Some(&spaced)), None);
+    }
+
+    #[test]
+    fn search_filter_selects_requested_fields() {
+        let selected = parse_search_filter(Some("discord_id, content"));
+        assert_eq!(
+            selected.ok(),
+            Some([true, false, false, false, false, false, false, false, true])
+        );
+        assert_eq!(parse_search_filter(None).ok(), Some([true; 9]));
+    }
+
+    #[test]
+    fn search_filter_rejects_unknown_and_empty_fields() {
+        assert!(parse_search_filter(Some("unknown")).is_err());
+        assert!(parse_search_filter(Some("")).is_err());
     }
 
     #[test]
