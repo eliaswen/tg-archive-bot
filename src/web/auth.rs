@@ -28,6 +28,46 @@ pub(super) async fn require_user(
     mut request: Request,
     next: Next,
 ) -> Response {
+    if let Some((token, user_id)) = &data.auth_bypass
+        && request
+            .headers()
+            .get("x-auth-bypass")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == token)
+    {
+        let channel_ids = match sqlx::query_scalar::<_, i64>("SELECT channel_id FROM channels")
+            .fetch_all(&data.pool)
+            .await
+        {
+            Ok(channel_ids) => channel_ids,
+            Err(error) => {
+                error!("Could not load authentication bypass channels: {}", error);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+        let username = match sqlx::query_scalar::<_, String>(
+            "SELECT discord_username FROM discord_users WHERE discord_id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&data.pool)
+        .await
+        {
+            Ok(Some(username)) => username,
+            Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+            Err(error) => {
+                error!("Could not load authentication bypass user: {}", error);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
+        request.extensions_mut().insert(WebUser {
+            id: *user_id,
+            username,
+            channel_ids,
+            channel_access: Vec::new(),
+            channel_access_refreshed_at: unix_timestamp(),
+        });
+        return next.run(request).await;
+    }
     match session.get::<WebUser>("user").await {
         Ok(Some(mut user)) => {
             if channel_access_needs_refresh(&user, request.uri().path()) {

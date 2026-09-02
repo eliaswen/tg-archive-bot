@@ -15,7 +15,6 @@ use std::{
 };
 use tower_sessions::Session;
 use tower_sessions_redis_store::fred::{error::{Error as RedisError, ErrorKind as RedisErrorKind}, prelude::*, types::{Expiration, SetOptions}};
-use tower_http::normalize_path::NormalizePathLayer;
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
 const RESULTS_PER_PAGE: i64 = 100;
@@ -413,7 +412,7 @@ pub(super) fn router(data: WebData) -> Router {
         ))
         .with_state(data);
 
-    app.layer(NormalizePathLayer::trim_trailing_slash())
+    app
 }
 
 async fn require_api_user(

@@ -18,6 +18,8 @@ env:
   TG_BOT_DISCORD_CLIENT_SECRET: zap-do-not-use
   TG_BOT_DISCORD_REDIRECT_URI: http://127.0.0.1:3000/login/discord/callback
   TG_BOT_ZAP_API_TOKEN: ZapApiScanToken000000000000000000000000000000000000000000000000
+  TG_BOT_AUTH_BYPASS_TOKEN: ZapSsrScanToken000000000000000000000000000000000000000000000000
+  TG_BOT_AUTH_BYPASS_USER_ID: 9000000000000000001
   TG_BOT_LOG: info
 
 jobs:
@@ -117,6 +119,13 @@ jobs:
             --header "Authorization: Bearer $TG_BOT_ZAP_API_TOKEN" \
             http://127.0.0.1:3000/api/v1/me
 
+      - name: Verify SSR authentication bypass
+        run: |
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header "x-auth-bypass: $TG_BOT_AUTH_BYPASS_TOKEN" \
+            http://127.0.0.1:3000/)
+          [[ "$status" -eq 200 ]]
+
       - name: Run authenticated ZAP API scan
         env:
           ZAP_AUTH_HEADER_VALUE: Bearer ${{ env.TG_BOT_ZAP_API_TOKEN }}
@@ -146,6 +155,9 @@ jobs:
           exit "$status"
 
       - name: Run ZAP SSR full scan
+        env:
+          ZAP_AUTH_HEADER: x-auth-bypass
+          ZAP_AUTH_HEADER_VALUE: ${{ env.TG_BOT_AUTH_BYPASS_TOKEN }}
         run: |
           mkdir -p zap-ssr-reports
           chmod 777 zap-ssr-reports
@@ -153,10 +165,12 @@ jobs:
           # Host networking makes 127.0.0.1 inside ZAP refer to this Linux runner,
           # where the Rust application is listening, rather than to an isolated container.
           docker run --rm --network host \
+            --env ZAP_AUTH_HEADER \
+            --env ZAP_AUTH_HEADER_VALUE \
             --volume "$GITHUB_WORKSPACE/zap-ssr-reports:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-full-scan.py \
-              -t http://127.0.0.1:3000/login \
+              -t http://127.0.0.1:3000/ \
               -r zap-report.html \
               -J zap-report.json \
               -x zap-report.xml \
@@ -265,7 +279,7 @@ jobs:
                       ruleId: $alert.pluginid,
                       level: (if $alert.riskcode == "3" then "error" elif $alert.riskcode == "2" then "warning" else "note" end),
                       message: {text: (($alert.alert // $alert.name) + " (" + (.method // "") + " " + (.uri // "") + ")")},
-                      logicalLocations: [{name: (.uri // "http://127.0.0.1:3000/")}]
+                      locations: [{logicalLocations: [{name: (.uri // "http://127.0.0.1:3000/")}]}]
                     }]
                   end
                 ) | flatten)

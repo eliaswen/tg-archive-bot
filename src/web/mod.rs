@@ -19,6 +19,8 @@ use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tower::util::MapResponse;
+use tower_http::normalize_path::NormalizePath;
 use tower_sessions::{Expiry, Session, SessionManagerLayer, cookie::time::Duration};
 use tower_sessions_redis_store::{RedisStore, fred::prelude::*};
 use tracing::{error, info};
@@ -56,6 +58,7 @@ struct WebData {
     redis: Pool,
     token_rate_limiter: api::TokenRateLimiter,
     api_permission_cache: api::ApiPermissionCache,
+    auth_bypass: Option<(String, i64)>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -598,6 +601,19 @@ pub async fn run(
     redis.wait_for_connect().await.expect("Failed to connect to Redis");
     let token_rate_limiter = api::TokenRateLimiter::from_env(redis.clone())
         .expect("Invalid TG_BOT_TRUSTED_PROXY_RANGES configuration");
+    let auth_bypass = match (
+        std::env::var("TG_BOT_AUTH_BYPASS_TOKEN").ok(),
+        std::env::var("TG_BOT_AUTH_BYPASS_USER_ID").ok(),
+    ) {
+        (Some(token), Some(user_id)) => Some((
+            token,
+            user_id
+                .parse()
+                .expect("Invalid TG_BOT_AUTH_BYPASS_USER_ID configuration"),
+        )),
+        (None, None) => None,
+        _ => panic!("TG_BOT_AUTH_BYPASS_TOKEN and TG_BOT_AUTH_BYPASS_USER_ID must be set together"),
+    };
     let data = WebData {
         pool,
         http: reqwest::Client::new(),
@@ -608,6 +624,7 @@ pub async fn run(
         redis: redis.clone(),
         token_rate_limiter,
         api_permission_cache: api::ApiPermissionCache::new(redis.clone()),
+        auth_bypass,
     };
     let archive = Router::new()
         .route("/", get(index))
@@ -668,9 +685,13 @@ pub async fn run(
         .layer(sessions);
 
     info!("Web server listening on {}", listener.local_addr().unwrap());
+    let make_service = MapResponse::new(
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+        NormalizePath::trim_trailing_slash,
+    );
     if let Err(error) = axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        make_service,
     )
     .await
     {
