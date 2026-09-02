@@ -164,13 +164,14 @@ jobs:
           set +e
           # Host networking makes 127.0.0.1 inside ZAP refer to this Linux runner,
           # where the Rust application is listening, rather than to an isolated container.
-          docker run --rm --network host \
+          timeout --signal=TERM --kill-after=30s 30m docker run --rm --network host \
             --env ZAP_AUTH_HEADER \
             --env ZAP_AUTH_HEADER_VALUE \
             --volume "$GITHUB_WORKSPACE/zap-ssr-reports:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-full-scan.py \
               -t http://127.0.0.1:3000/ \
+              -m 10 \
               -r zap-report.html \
               -J zap-report.json \
               -x zap-report.xml \
