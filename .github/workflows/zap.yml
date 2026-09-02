@@ -186,7 +186,7 @@ jobs:
                       ruleId: $alert.pluginid,
                       level: (if $alert.riskcode == "3" then "error" elif $alert.riskcode == "2" then "warning" else "note" end),
                       message: {text: (($alert.alert // $alert.name) + " (" + (.method // "") + " " + (.uri // "") + ")")},
-                      locations: [{physicalLocation: {artifactLocation: {uri: .uri}}}]
+                      locations: [{physicalLocation: {artifactLocation: {uri: "openapi.json"}}}]
                     }]
                   end
                 ) | flatten)
