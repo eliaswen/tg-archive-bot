@@ -32,10 +32,9 @@ pub async fn event_handler(
                     "Updated message {} was not cached, queueing it for retrieval",
                     event.id.get()
                 );
-                super::message_archive::enqueue_message_fetch(
+                super::message_archive::enqueue_message_update(
                     &user_data.pool,
-                    event.channel_id,
-                    event.id,
+                    event,
                     event.guild_id,
                 )
                 .await?;
@@ -48,10 +47,9 @@ pub async fn event_handler(
                     "Updated message {} had no server ID, queueing it for retrieval",
                     event.id.get()
                 );
-                super::message_archive::enqueue_message_fetch(
+                super::message_archive::enqueue_message_update(
                     &user_data.pool,
-                    event.channel_id,
-                    event.id,
+                    event,
                     event.guild_id.or(old_guild_id),
                 )
                 .await?;

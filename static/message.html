@@ -1,5 +1,6 @@
 <h2>Message {{message_id}}</h2>
 <p>You can see this message because {{access_reason}}.</p>
+{% if archive_incomplete %}<p>Part of this message's edits are missing from the archive.</p>{% endif %}
 {{version_navigation|safe}}
 <dl>
     <dt>Author</dt><dd><a href="/users/{{author_id}}">{{author}} ({{author_id}})</a></dd>

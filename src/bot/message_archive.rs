@@ -9,9 +9,8 @@ const MAX_ARCHIVE_ATTEMPTS: i32 = 10;
 #[derive(serde::Deserialize, serde::Serialize)]
 enum ArchivePayload {
     Message(Box<sere::Message>),
-    Fetch {
-        channel_id: u64,
-        message_id: u64,
+    Update {
+        event: Box<sere::MessageUpdateEvent>,
         guild_id: Option<u64>,
     },
 }
@@ -34,18 +33,16 @@ pub async fn enqueue_message(
     enqueue_payload(pool, message.id.get() as i64, is_edit, payload).await
 }
 
-pub async fn enqueue_message_fetch(
+pub async fn enqueue_message_update(
     pool: &sqlx::PgPool,
-    channel_id: sere::ChannelId,
-    message_id: sere::MessageId,
+    event: &sere::MessageUpdateEvent,
     guild_id: Option<sere::GuildId>,
 ) -> Result<(), Error> {
-    let payload = serde_json::to_value(ArchivePayload::Fetch {
-        channel_id: channel_id.get(),
-        message_id: message_id.get(),
+    let payload = serde_json::to_value(ArchivePayload::Update {
+        event: Box::new(event.clone()),
         guild_id: guild_id.map(|id| id.get()),
     })?;
-    enqueue_payload(pool, message_id.get() as i64, true, payload).await
+    enqueue_payload(pool, event.id.get() as i64, true, payload).await
 }
 
 async fn enqueue_payload(
@@ -109,14 +106,9 @@ async fn process_event(
 ) -> Result<(), Error> {
     let message = match serde_json::from_value::<ArchivePayload>(payload)? {
         ArchivePayload::Message(message) => *message,
-        ArchivePayload::Fetch {
-            channel_id,
-            message_id,
-            guild_id,
-        } => {
-            let mut message = sere::ChannelId::new(channel_id)
-                .message(ctx, sere::MessageId::new(message_id))
-                .await?;
+        ArchivePayload::Update { event, guild_id } => {
+            let mut message = event.channel_id.message(ctx, event.id).await?;
+            event.apply_to_message(&mut message);
             if message.guild_id.is_none() {
                 message.guild_id = guild_id.map(sere::GuildId::new);
             }
@@ -136,11 +128,17 @@ async fn claim_next(
         "UPDATE archive_queue
          SET attempts = attempts + 1, locked_until = NOW() + INTERVAL '5 minutes'
          WHERE id = (
-             SELECT id FROM archive_queue
-             WHERE failed_at IS NULL
-               AND available_at <= NOW()
-               AND (locked_until IS NULL OR locked_until <= NOW())
-             ORDER BY available_at, id
+             SELECT q.id FROM archive_queue q
+             WHERE q.failed_at IS NULL
+               AND q.available_at <= NOW()
+               AND (q.locked_until IS NULL OR q.locked_until <= NOW())
+               AND NOT EXISTS (
+                   SELECT 1 FROM archive_queue earlier
+                   WHERE earlier.message_id = q.message_id
+                     AND earlier.id < q.id
+                     AND earlier.failed_at IS NULL
+               )
+             ORDER BY q.available_at, q.id
              FOR UPDATE SKIP LOCKED
              LIMIT 1
          )
@@ -152,12 +150,20 @@ async fn claim_next(
 
 async fn mark_failed(pool: &sqlx::PgPool, event_id: i64, message: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE archive_queue
-         SET last_error = $2,
-             locked_until = NULL,
-             available_at = NOW() + LEAST(POWER(2, attempts), 300) * INTERVAL '1 second',
-             failed_at = CASE WHEN attempts >= $3 THEN NOW() ELSE NULL END
-         WHERE id = $1",
+        "WITH failed AS (
+             UPDATE archive_queue
+             SET last_error = $2,
+                 locked_until = NULL,
+                 available_at = NOW() + LEAST(POWER(2, attempts), 300) * INTERVAL '1 second',
+                 failed_at = CASE WHEN attempts >= $3 THEN NOW() ELSE NULL END
+             WHERE id = $1
+             RETURNING message_id, failed_at
+         )
+         UPDATE messages
+         SET archive_incomplete = TRUE
+         FROM failed
+         WHERE messages.message_id = failed.message_id
+           AND failed.failed_at IS NOT NULL",
     )
     .bind(event_id)
     .bind(message)
@@ -211,12 +217,29 @@ async fn record_message_version(
     let timestamp = message.timestamp.to_string();
     let mut transaction = pool.begin().await?;
 
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(message_id)
+        .execute(&mut *transaction)
+        .await?;
+
     if sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM message_versions WHERE source_event_id = $1)",
     )
     .bind(source_event_id)
     .fetch_one(&mut *transaction)
     .await?
+    {
+        transaction.commit().await?;
+        return Ok(());
+    }
+
+    if !is_edit
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM message_versions WHERE message_id = $1)",
+        )
+        .bind(message_id)
+        .fetch_one(&mut *transaction)
+        .await?
     {
         transaction.commit().await?;
         return Ok(());
@@ -342,6 +365,19 @@ async fn record_message_version(
     .execute(&mut *transaction)
     .await?;
 
+    sqlx::query(
+        "UPDATE messages
+         SET archive_incomplete = TRUE
+         WHERE message_id = $1
+           AND EXISTS(
+               SELECT 1 FROM archive_queue
+               WHERE message_id = $1 AND failed_at IS NOT NULL
+           )",
+    )
+    .bind(message_id)
+    .execute(&mut *transaction)
+    .await?;
+
     sqlx::query("SELECT message_id FROM messages WHERE message_id = $1 FOR UPDATE")
         .bind(message_id)
         .fetch_one(&mut *transaction)
@@ -353,18 +389,6 @@ async fn record_message_version(
     .bind(source_event_id)
     .fetch_one(&mut *transaction)
     .await?
-    {
-        transaction.commit().await?;
-        return Ok(());
-    }
-
-    if !is_edit
-        && sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM message_versions WHERE message_id = $1)",
-        )
-        .bind(message_id)
-        .fetch_one(&mut *transaction)
-        .await?
     {
         transaction.commit().await?;
         return Ok(());
@@ -566,4 +590,58 @@ async fn record_message_version(
 
 fn optional_u32_to_i32(value: Option<u32>) -> Result<Option<i32>, std::num::TryFromIntError> {
     value.map(i32::try_from).transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_pool() -> Option<sqlx::PgPool> {
+        let database_url = std::env::var("DATABASE_URL").ok()?;
+        let pool = sqlx::PgPool::connect(&database_url).await.ok()?;
+        sqlx::migrate!().run(&pool).await.ok()?;
+        Some(pool)
+    }
+
+    #[tokio::test]
+    async fn keeps_later_message_events_blocked_until_the_first_event_dead_letters() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let message_id = -9_000_000_001_i64;
+        sqlx::query("DELETE FROM archive_queue WHERE message_id = $1")
+            .bind(message_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let first = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO archive_queue (message_id, is_edit, payload, attempts)
+             VALUES ($1, TRUE, '{}'::jsonb, 9)
+             RETURNING id",
+        )
+        .bind(message_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let second = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO archive_queue (message_id, is_edit, payload)
+             VALUES ($1, TRUE, '{}'::jsonb)
+             RETURNING id",
+        )
+        .bind(message_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(claim_next(&pool).await.unwrap().unwrap().0, first);
+        assert!(claim_next(&pool).await.unwrap().is_none());
+        mark_failed(&pool, first, "test").await.unwrap();
+        assert_eq!(claim_next(&pool).await.unwrap().unwrap().0, second);
+
+        sqlx::query("DELETE FROM archive_queue WHERE message_id = $1")
+            .bind(message_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
 }

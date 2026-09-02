@@ -912,7 +912,7 @@ pub(super) async fn message(
     Path(message_id): Path<i64>,
     Query(query): Query<MessageQuery>,
 ) -> WebResult {
-    let message = sqlx::query_as::<_, (String, i64, i64, String, i64, String, String)>(
+    let message = sqlx::query_as::<_, (String, i64, i64, String, i64, String, String, bool)>(
         "SELECT
              m.author_username,
              m.author_id,
@@ -920,7 +920,8 @@ pub(super) async fn message(
              g.guild_name,
              m.channel_id,
              c.channel_name,
-             m.timestamp::text
+             m.timestamp::text,
+             m.archive_incomplete
          FROM messages m
          JOIN guilds g ON g.guild_id = m.guild_id
          JOIN channels c ON c.channel_id = m.channel_id
@@ -930,7 +931,7 @@ pub(super) async fn message(
     .fetch_optional(&data.pool)
     .await
     .map_err(database_error)?;
-    let Some((author, author_id, server_id, server, channel_id, channel, timestamp)) = message
+    let Some((author, author_id, server_id, server, channel_id, channel, timestamp, archive_incomplete)) = message
     else {
         return Err(not_found("Message not found."));
     };
@@ -1011,6 +1012,7 @@ pub(super) async fn message(
         channel_id,
         channel: &channel,
         timestamp: &timestamp,
+        archive_incomplete,
         version_navigation: message_version_navigation(
             message_id,
             message_version,

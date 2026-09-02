@@ -231,6 +231,7 @@ struct MessageResponse {
     channel_id: i64,
     channel_name: String,
     timestamp: String,
+    archive_incomplete: bool,
     version: i64,
     archived_at: String,
     content: Option<String>,
@@ -492,15 +493,6 @@ async fn create_token(
         Ok(None) => return api_error(StatusCode::UNAUTHORIZED, "browser login required"),
         Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "session error"),
     };
-    let client_ip = data.token_rate_limiter.client_ip(peer.ip(), &headers);
-    match data.token_rate_limiter.check(client_ip).await {
-        Ok(Ok(())) => {}
-        Ok(Err(retry_after)) => return rate_limited(retry_after),
-        Err(error) => {
-            tracing::error!("Token rate limit check failed: {}", error);
-            return api_error(StatusCode::SERVICE_UNAVAILABLE, "rate limiter unavailable");
-        }
-    }
     if query
         .valid_from
         .zip(query.valid_to)
@@ -513,6 +505,15 @@ async fn create_token(
     }
     if !valid_unix_timestamp(query.valid_from) || !valid_unix_timestamp(query.valid_to) {
         return api_error(StatusCode::BAD_REQUEST, "invalid Unix timestamp");
+    }
+    let client_ip = data.token_rate_limiter.client_ip(peer.ip(), &headers);
+    match data.token_rate_limiter.check(client_ip).await {
+        Ok(Ok(())) => {}
+        Ok(Err(retry_after)) => return rate_limited(retry_after),
+        Err(error) => {
+            tracing::error!("Token rate limit check failed: {}", error);
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "rate limiter unavailable");
+        }
     }
     let token: String = rand::rng()
         .sample_iter(&Alphanumeric)
@@ -900,9 +901,9 @@ async fn view_message(
     Path(id): Path<i64>,
     Query(query): Query<VersionQuery>,
 ) -> ApiResult<MessageResponse> {
-    let message = sqlx::query_as::<_, (i64, i64, String, i64, String, i64, String, String)>(
+    let message = sqlx::query_as::<_, (i64, i64, String, i64, String, i64, String, String, bool)>(
         "SELECT m.message_id, m.author_id, m.author_username, m.guild_id, g.guild_name,
-                m.channel_id, c.channel_name, m.timestamp::text FROM messages m
+                m.channel_id, c.channel_name, m.timestamp::text, m.archive_incomplete FROM messages m
          JOIN guilds g ON g.guild_id = m.guild_id JOIN channels c ON c.channel_id = m.channel_id
          WHERE m.message_id = $1 AND (m.channel_id = ANY($2) OR m.author_id = $3)",
     )
@@ -939,6 +940,7 @@ async fn view_message(
         channel_id: message.5,
         channel_name: message.6,
         timestamp: message.7,
+        archive_incomplete: message.8,
         version: version.0,
         content: version.1,
         archived_at: version.2,
@@ -1253,6 +1255,121 @@ mod tests {
         assert!(valid_unix_timestamp(None));
         assert!(valid_unix_timestamp(Some(0)));
         assert!(!valid_unix_timestamp(Some(i64::MAX)));
+    }
+
+    #[tokio::test]
+    async fn enforces_token_ownership_validity_last_use_and_self_revocation_in_the_database() {
+        let Ok(database_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&database_url).await else {
+            return;
+        };
+        sqlx::migrate!().run(&pool).await.unwrap();
+        let first_user = -9_000_000_011_i64;
+        let second_user = -9_000_000_012_i64;
+        sqlx::query(
+            "INSERT INTO discord_users (discord_id, discord_username)
+             VALUES ($1, 'first'), ($2, 'second')
+             ON CONFLICT (discord_id) DO NOTHING",
+        )
+        .bind(first_user)
+        .bind(second_user)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let active_hash = token_hash("database-active-token");
+        let expired_hash = token_hash("database-expired-token");
+        let active_id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO api_tokens (token_hash, discord_id, valid_from, valid_to)
+             VALUES ($1, $2, NOW() - INTERVAL '1 minute', NOW() + INTERVAL '1 minute')
+             RETURNING id",
+        )
+        .bind(&active_hash)
+        .bind(first_user)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO api_tokens (token_hash, discord_id, valid_to)
+             VALUES ($1, $2, NOW() - INTERVAL '1 minute')",
+        )
+        .bind(&expired_hash)
+        .bind(second_user)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let identity = sqlx::query_as::<_, (i64, i64)>(
+            "UPDATE api_tokens
+             SET last_used_at = NOW()
+             WHERE token_hash = $1
+               AND (valid_from IS NULL OR valid_from <= NOW())
+               AND (valid_to IS NULL OR valid_to >= NOW())
+             RETURNING id, discord_id",
+        )
+        .bind(&active_hash)
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(identity, Some((active_id, first_user)));
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT last_used_at IS NOT NULL FROM api_tokens WHERE id = $1",
+            )
+            .bind(active_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        );
+        assert!(
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT discord_id FROM api_tokens
+             WHERE token_hash = $1
+               AND (valid_from IS NULL OR valid_from <= NOW())
+               AND (valid_to IS NULL OR valid_to >= NOW())",
+            )
+            .bind(&expired_hash)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM api_tokens WHERE discord_id = $1",)
+                .bind(first_user)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            sqlx::query("DELETE FROM api_tokens WHERE id = $1 AND discord_id = $2")
+                .bind(active_id)
+                .bind(second_user)
+                .execute(&pool)
+                .await
+                .unwrap()
+                .rows_affected(),
+            0
+        );
+        assert_eq!(
+            sqlx::query("DELETE FROM api_tokens WHERE id = $1 AND discord_id = $2")
+                .bind(active_id)
+                .bind(first_user)
+                .execute(&pool)
+                .await
+                .unwrap()
+                .rows_affected(),
+            1
+        );
+
+        sqlx::query("DELETE FROM discord_users WHERE discord_id IN ($1, $2)")
+            .bind(first_user)
+            .bind(second_user)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     #[test]
     fn rejects_invalid_authorization_headers() {

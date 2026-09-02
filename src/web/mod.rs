@@ -354,6 +354,7 @@ struct MessageTemplate<'a> {
     channel_id: i64,
     channel: &'a str,
     timestamp: &'a str,
+    archive_incomplete: bool,
     version_navigation: String,
     content: &'a str,
     attachments: String,
