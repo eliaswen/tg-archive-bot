@@ -1,0 +1,226 @@
+name: OWASP ZAP API scan
+
+on:
+  workflow_dispatch:
+  push: 
+    branches:
+      - main
+  schedule:
+    - cron: "17 3 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+  TG_BOT_DATABASE_URL: postgres://zap:zap@127.0.0.1:5432/tg_archive_bot_zap
+  TG_BOT_REDIS_URL: redis://127.0.0.1:6379
+  TG_BOT_WEB_ADDRESS: 0.0.0.0:3000
+  TG_BOT_DISCORD_TOKEN: zap-do-not-use
+  TG_BOT_DISCORD_CLIENT_ID: zap-do-not-use
+  TG_BOT_DISCORD_CLIENT_SECRET: zap-do-not-use
+  TG_BOT_DISCORD_REDIRECT_URI: http://127.0.0.1:3000/login/discord/callback
+  TG_BOT_ZAP_API_TOKEN: ZapApiScanToken000000000000000000000000000000000000000000000000
+  TG_BOT_LOG: info
+
+jobs:
+  scan:
+    name: Authenticated API scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: zap
+          POSTGRES_PASSWORD: zap
+          POSTGRES_DB: tg_archive_bot_zap
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U zap -d tg_archive_bot_zap"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgmp-dev libmpfr-dev libmpc-dev
+
+      - name: Set up Rust
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --silent --show-error --fail \
+              https://sh.rustup.rs --output /tmp/rustup-init.sh
+            sh /tmp/rustup-init.sh -y --profile minimal
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Build API and seeder
+        run: cargo build --bins --locked
+
+      - name: Run migrations and seed disposable data
+        run: cargo run --locked --bin dummy_data
+
+      - name: Prevent permission lookup from contacting Discord
+        run: |
+          docker run --rm --network host redis:8-alpine \
+            redis-cli -h 127.0.0.1 SET api-permissions:9000000000000000001 '[]' EX 7200
+
+      - name: Start API
+        run: |
+          target/debug/tg-archive-bot web >api.log 2>&1 &
+          echo "$!" > api.pid
+
+      - name: Wait for API and OpenAPI document
+        run: |
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$(cat api.pid)" 2>/dev/null; then
+              echo "API process exited during startup"
+              cat api.log
+              exit 1
+            fi
+            if curl --silent --show-error --fail http://127.0.0.1:3000/api/v1/healthcheck >/dev/null && \
+               curl --silent --show-error --fail http://127.0.0.1:3000/openapi.json -o openapi.json; then
+              python3 -m json.tool openapi.json >/dev/null
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "API did not become ready"
+          cat api.log
+          exit 1
+
+      - name: Verify seeded API token
+        run: |
+          curl --silent --show-error --fail \
+            --header "Authorization: Bearer $TG_BOT_ZAP_API_TOKEN" \
+            http://127.0.0.1:3000/api/v1/me
+
+      - name: Run authenticated ZAP API scan
+        env:
+          ZAP_AUTH_HEADER_VALUE: Bearer ${{ env.TG_BOT_ZAP_API_TOKEN }}
+        run: |
+          mkdir -p zap-reports
+          chmod 777 zap-reports
+          set +e
+          # Host networking makes 127.0.0.1 inside ZAP refer to this Linux runner,
+          # where the Rust API is listening, rather than to an isolated container.
+          docker run --rm --network host \
+            --env ZAP_AUTH_HEADER_VALUE \
+            --volume "$GITHUB_WORKSPACE/zap-reports:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-api-scan.py \
+              -t http://127.0.0.1:3000/openapi.json \
+              -f openapi \
+              -r zap-report.html \
+              -J zap-report.json \
+              -x zap-report.xml \
+              -g rules.tsv
+          status=$?
+          set -e
+
+          if [[ "$status" -eq 0 || "$status" -eq 1 || "$status" -eq 2 ]]; then
+            echo "ZAP completed with report status $status; findings are non-blocking for now."
+            exit 0
+          fi
+          echo "ZAP failed to run (exit status $status)."
+          exit "$status"
+
+      - name: Convert ZAP report to SARIF
+        run: |
+          jq '
+            . as $zap |
+            [$zap.site[]?.alerts[]?] as $alerts |
+            {
+              version: "2.1.0",
+              "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+              runs: [{
+                tool: {
+                  driver: {
+                    name: "OWASP ZAP",
+                    informationUri: "https://www.zaproxy.org/",
+                    version: ($zap["@version"] // "unknown"),
+                    rules: ($alerts | unique_by(.pluginid) | map({
+                      id: .pluginid,
+                      shortDescription: {text: (.alert // .name)},
+                      fullDescription: {text: ((.desc // "") | gsub("<[^>]+>"; ""))},
+                      help: {text: ((.solution // "") | gsub("<[^>]+>"; ""))},
+                      properties: {
+                        tags: (["security", "external/cwe/cwe-" + (.cweid // "-1")]),
+                        "security-severity": (if .riskcode == "3" then "8.0" elif .riskcode == "2" then "5.0" elif .riskcode == "1" then "3.0" else "0.0" end)
+                      }
+                    }))
+                  }
+                },
+                results: ($alerts | map(
+                  . as $alert |
+                  if ((.instances // []) | length) == 0 then
+                    [{
+                      ruleId: .pluginid,
+                      level: (if .riskcode == "3" then "error" elif .riskcode == "2" then "warning" else "note" end),
+                      message: {text: (.alert // .name)}
+                    }]
+                  else
+                    [.instances[] | {
+                      ruleId: $alert.pluginid,
+                      level: (if $alert.riskcode == "3" then "error" elif $alert.riskcode == "2" then "warning" else "note" end),
+                      message: {text: (($alert.alert // $alert.name) + " (" + (.method // "") + " " + (.uri // "") + ")")},
+                      locations: [{physicalLocation: {artifactLocation: {uri: .uri}}}]
+                    }]
+                  end
+                ) | flatten)
+              }]
+            }
+          ' zap-reports/zap-report.json > zap-reports/zap-report.sarif
+          jq --exit-status '.version == "2.1.0" and (.runs | type == "array")' \
+            zap-reports/zap-report.sarif >/dev/null
+
+      - name: Upload SARIF to GitHub code scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: zap-reports/zap-report.sarif
+          category: owasp-zap-api
+
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-api-reports
+          path: zap-reports/
+          if-no-files-found: warn
+
+      - name: Upload API log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-api-server-log
+          path: api.log
+          if-no-files-found: warn
+
+      - name: Stop API
+        if: always()
+        run: |
+          if [[ -f api.pid ]]; then
+            kill "$(cat api.pid)" 2>/dev/null || true
+          fi

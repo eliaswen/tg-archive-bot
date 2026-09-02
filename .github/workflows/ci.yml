@@ -64,6 +64,7 @@ jobs:
       contents: read
     outputs:
       is_release: ${{ steps.release_commit.outputs.is_release }}
+      is_prerelease: ${{ steps.release_commit.outputs.is_prerelease }}
       version: ${{ steps.release_commit.outputs.version }}
 
     steps:
@@ -80,6 +81,11 @@ jobs:
           if [[ "$subject" =~ ^Release\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             echo "is_release=true" >> "$GITHUB_OUTPUT"
             echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+            if [[ "${BASH_REMATCH[1]%%.*}" -eq 0 ]]; then
+              echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
   container:
@@ -177,7 +183,13 @@ jobs:
             exit 0
           fi
 
+          prerelease=()
+          if [[ "${{ needs.release_metadata.outputs.is_prerelease }}" == "true" ]]; then
+            prerelease+=(--prerelease)
+          fi
+
           gh release create "$VERSION" \
             --target "$GITHUB_SHA" \
             --title "Release $VERSION" \
-            --notes-file release-notes.md
+            --notes-file release-notes.md \
+            "${prerelease[@]}"

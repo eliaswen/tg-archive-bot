@@ -21,10 +21,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tower_sessions::{Expiry, Session, SessionManagerLayer, cookie::time::Duration};
 use tower_sessions_redis_store::{RedisStore, fred::prelude::*};
 use tracing::{error, info};
+use utoipa::OpenApi;
 
 pub use crate::archive_stats::format_bytes;
 use auth::*;
 use handlers::*;
+
+fn openapi() -> String {
+    api::ApiDoc::openapi().to_pretty_json().unwrap()
+}
+
+async fn openapi_json() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "application/json")], openapi())
+}
 
 tokio::task_local! {
     static ACTIVE_THEME: Theme;
@@ -633,6 +642,7 @@ pub async fn run(
         .with_expiry(Expiry::OnInactivity(Duration::hours(12)));
     let api = api::router(data.clone());
     let app = Router::new()
+        .route("/openapi.json", get(openapi_json))
         .route("/login", get(login))
         .route("/privacy", get(privacy))
         .route("/privacy-policy", get(privacy_policy))

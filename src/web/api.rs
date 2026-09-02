@@ -20,6 +20,7 @@ use std::{
 };
 use tower_sessions::Session;
 use tower_sessions_redis_store::fred::{error::{Error as RedisError, ErrorKind as RedisErrorKind}, prelude::*, types::{Expiration, SetOptions}};
+use utoipa::{IntoParams, OpenApi, ToSchema};
 
 const RESULTS_PER_PAGE: i64 = 100;
 const TOKEN_RATE_LIMIT: Duration = Duration::from_secs(5 * 60);
@@ -141,27 +142,28 @@ struct ApiUser {
     discord_id: i64,
     channel_ids: Vec<i64>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ErrorResponse {
     error: &'static str,
 }
 type ApiResult<T> = Result<Json<T>, (StatusCode, Json<ErrorResponse>)>;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct MeResponse {
     discord_id: i64,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct TokenResponse {
     id: i64,
     token: String,
 }
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
 struct CreateTokenQuery {
     valid_from: Option<i64>,
     valid_to: Option<i64>,
 }
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, sqlx::FromRow, ToSchema)]
 struct TokenInfoResponse {
     id: i64,
     created_at: i64,
@@ -169,20 +171,20 @@ struct TokenInfoResponse {
     valid_to: Option<i64>,
     last_used_at: Option<i64>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ServerResponse {
     discord_id: i64,
     name: String,
     icon_url: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ChannelResponse {
     discord_id: i64,
     name: String,
     server_id: i64,
     server_name: String,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct UserResponse {
     discord_id: i64,
     username: String,
@@ -197,19 +199,19 @@ struct UserResponse {
     usernames: Vec<UserNameResponse>,
     avatars: Vec<UserAvatarResponse>,
 }
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, sqlx::FromRow, ToSchema)]
 struct UserNameResponse {
     username: String,
     first_seen_at: String,
     last_seen_at: String,
 }
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, sqlx::FromRow, ToSchema)]
 struct UserAvatarResponse {
     url: String,
     first_seen_at: String,
     last_seen_at: String,
 }
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, sqlx::FromRow, ToSchema)]
 struct AttachmentResponse {
     discord_id: i64,
     filename: String,
@@ -217,14 +219,14 @@ struct AttachmentResponse {
     content_type: Option<String>,
     size: i64,
 }
-#[derive(Serialize, sqlx::FromRow)]
+#[derive(Serialize, sqlx::FromRow, ToSchema)]
 struct EmbedResponse {
     index: i32,
     title: Option<String>,
     description: Option<String>,
     url: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct MessageResponse {
     discord_id: i64,
     author_id: i64,
@@ -252,7 +254,7 @@ struct MessageSummary {
     timestamp: String,
     content: Option<String>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct FilteredMessageSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     discord_id: Option<i64>,
@@ -273,17 +275,19 @@ struct FilteredMessageSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<Option<String>>,
 }
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct SearchResponse {
     query: String,
     limit: i64,
     results: Vec<FilteredMessageSummary>,
 }
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
 struct VersionQuery {
     version: Option<i64>,
 }
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
 struct SearchQuery {
     #[serde(default)]
     q: String,
@@ -303,7 +307,7 @@ const SEARCH_FIELDS: [&str; 9] = [
     "content",
 ];
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 enum MetadataType {
     #[default]
@@ -313,7 +317,7 @@ enum MetadataType {
     User,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 enum MetadataLookup {
     #[default]
@@ -340,12 +344,45 @@ impl MetadataLookup {
     }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, IntoParams, ToSchema)]
+#[into_params(parameter_in = Query)]
 struct MetadataQuery {
     #[serde(default)]
     mtype: MetadataType,
     id: i64,
     ltype: MetadataLookup,
+}
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        create_token, token_info, revoke_token, me, view_server, view_attachment,
+        download_attachment, view_channel, view_user, view_message, search_timestamp,
+        search_content, metadata_lookup, healthcheck
+    ),
+    components(schemas(
+        ErrorResponse, MeResponse, TokenResponse, TokenInfoResponse, ServerResponse,
+        ChannelResponse, UserResponse, UserNameResponse, UserAvatarResponse,
+        AttachmentResponse, EmbedResponse, MessageResponse, FilteredMessageSummary,
+        SearchResponse, MetadataType, MetadataLookup
+    )),
+    modifiers(&SecurityAddon)
+)]
+pub(super) struct ApiDoc;
+
+struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        openapi.components.as_mut().unwrap().add_security_scheme(
+            "bearer_auth",
+            utoipa::openapi::security::SecurityScheme::Http(
+                utoipa::openapi::security::Http::new(
+                    utoipa::openapi::security::HttpAuthScheme::Bearer,
+                ),
+            ),
+        );
+    }
 }
 
 pub(super) fn router(data: WebData) -> Router {
@@ -428,6 +465,19 @@ async fn require_api_user(
     next.run(request).await
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/token",
+    params(CreateTokenQuery),
+    responses(
+        (status = 200, body = TokenResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 429, body = ErrorResponse),
+        (status = 500, body = ErrorResponse),
+        (status = 503, body = ErrorResponse)
+    )
+)]
 async fn create_token(
     State(data): State<WebData>,
     session: Session,
@@ -509,6 +559,16 @@ async fn create_token(
     .into_response()
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/token/info",
+    responses(
+        (status = 200, body = Vec<TokenInfoResponse>),
+        (status = 401, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn token_info(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -530,6 +590,16 @@ async fn token_info(
     Ok(Json(tokens))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/token/revoke",
+    responses(
+        (status = 204),
+        (status = 401, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn revoke_token(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -553,12 +623,30 @@ fn valid_unix_timestamp(value: Option<i64>) -> bool {
     value.is_none_or(|value| chrono::DateTime::from_timestamp(value, 0).is_some())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/me",
+    responses((status = 200, body = MeResponse), (status = 401, body = ErrorResponse)),
+    security(("bearer_auth" = []))
+)]
 async fn me(Extension(user): Extension<ApiUser>) -> Json<MeResponse> {
     Json(MeResponse {
         discord_id: user.discord_id,
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/view/server/{id}",
+    params(("id" = i64, Path)),
+    responses(
+        (status = 200, body = ServerResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn view_server(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -582,6 +670,18 @@ async fn view_server(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/view/attachment/{id}",
+    params(("id" = i64, Path), VersionQuery),
+    responses(
+        (status = 200, body = AttachmentResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn view_attachment(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -607,6 +707,18 @@ async fn view_attachment(
     Ok(Json(row))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/download/attachment/{id}",
+    params(("id" = i64, Path), VersionQuery),
+    responses(
+        (status = 200, content_type = "application/octet-stream", body = Vec<u8>),
+        (status = 401, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn download_attachment(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -647,6 +759,18 @@ async fn download_attachment(
         .into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/view/channel/{id}",
+    params(("id" = i64, Path)),
+    responses(
+        (status = 200, body = ChannelResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn view_channel(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -664,6 +788,18 @@ async fn view_channel(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/view/user/{id}",
+    params(("id" = i64, Path)),
+    responses(
+        (status = 200, body = UserResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn view_user(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -744,6 +880,18 @@ async fn view_user(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/view/message/{id}",
+    params(("id" = i64, Path), VersionQuery),
+    responses(
+        (status = 200, body = MessageResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn view_message(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -797,6 +945,18 @@ async fn view_message(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/search/timestamp",
+    params(SearchQuery),
+    responses(
+        (status = 200, body = SearchResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn search_timestamp(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -804,6 +964,18 @@ async fn search_timestamp(
 ) -> ApiResult<SearchResponse> {
     search(&data, &user, &query, &query.limit.unwrap_or(100), true).await
 }
+#[utoipa::path(
+    get,
+    path = "/api/v1/search/content",
+    params(SearchQuery),
+    responses(
+        (status = 200, body = SearchResponse),
+        (status = 400, body = ErrorResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn search_content(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -889,6 +1061,19 @@ fn parse_search_filter(
     Ok(selected)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/metadata",
+    params(MetadataQuery),
+    responses(
+        (status = 200, body = i64),
+        (status = 400, body = ErrorResponse),
+        (status = 401, body = ErrorResponse),
+        (status = 404, body = ErrorResponse),
+        (status = 500, body = ErrorResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
 async fn metadata_lookup(
     State(data): State<WebData>,
     Extension(user): Extension<ApiUser>,
@@ -993,6 +1178,14 @@ fn rate_limited(retry_after: u64) -> Response {
     response
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/healthcheck",
+    responses(
+        (status = 200, content_type = "text/plain", body = String),
+        (status = 503, content_type = "text/plain", body = String)
+    )
+)]
 async fn healthcheck(State(data): State<WebData>) -> impl IntoResponse {
     let database = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&data.pool)
