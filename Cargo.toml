@@ -11,7 +11,7 @@ homepage = "https://git.ewenlau.net/ewenlau/tg-archive-bot"
 
 [dependencies]
 askama = "=0.16.0"
-axum = { version = "=0.8.4", features = ["form"] }
+axum = { version = "=0.8.9", features = ["form"] }
 axum-extra = { version = "=0.12.6", features = ["cookie"] }
 chrono = "=0.4.45"
 chrono-tz = "=0.10.4"
