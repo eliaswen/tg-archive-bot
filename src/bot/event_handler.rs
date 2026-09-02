@@ -8,9 +8,10 @@ pub async fn event_handler(
     _framework: poise::FrameworkContext<'_, Data, Error>,
     user_data: &Data,
 ) -> Result<(), Error> {
+    super::message_archive::ensure_worker_started(ctx, user_data);
     match event {
         sere::FullEvent::Message { new_message } => {
-            super::message_archive::record_message(ctx, new_message, &user_data.pool).await?;
+            super::message_archive::enqueue_message(&user_data.pool, new_message, false).await?;
         }
         sere::FullEvent::MessageUpdate {
             old_if_available,
@@ -28,22 +29,36 @@ pub async fn event_handler(
                 updated_message
             } else {
                 debug!(
-                    "Updated message {} was not cached, fetching it from Discord",
+                    "Updated message {} was not cached, queueing it for retrieval",
                     event.id.get()
                 );
-                event.channel_id.message(ctx, event.id).await?
+                super::message_archive::enqueue_message_fetch(
+                    &user_data.pool,
+                    event.channel_id,
+                    event.id,
+                    event.guild_id,
+                )
+                .await?;
+                return Ok(());
             };
             message.guild_id =
                 updated_message_guild_id(message.guild_id, event.guild_id, old_guild_id);
             if message.guild_id.is_none() {
                 debug!(
-                    "Updated message {} had no server ID in the gateway event, fetching it from Discord",
+                    "Updated message {} had no server ID, queueing it for retrieval",
                     event.id.get()
                 );
-                message = event.channel_id.message(ctx, event.id).await?;
+                super::message_archive::enqueue_message_fetch(
+                    &user_data.pool,
+                    event.channel_id,
+                    event.id,
+                    event.guild_id.or(old_guild_id),
+                )
+                .await?;
+                return Ok(());
             }
 
-            super::message_archive::record_message_edit(ctx, &message, &user_data.pool).await?;
+            super::message_archive::enqueue_message(&user_data.pool, &message, true).await?;
         }
         sere::FullEvent::MessageDelete {
             deleted_message_id, ..

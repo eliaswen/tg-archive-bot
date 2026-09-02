@@ -1,21 +1,170 @@
 use crate::Error;
 use poise::serenity_prelude as sere;
-use tracing::{debug, trace};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tracing::{debug, error, trace};
 
-pub async fn record_message(
-    ctx: &sere::Context,
-    message: &sere::Message,
-    pool: &sqlx::PgPool,
-) -> Result<(), Error> {
-    record_message_version(ctx, message, pool, false).await
+const MAX_ARCHIVE_ATTEMPTS: i32 = 10;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+enum ArchivePayload {
+    Message(Box<sere::Message>),
+    Fetch {
+        channel_id: u64,
+        message_id: u64,
+        guild_id: Option<u64>,
+    },
 }
 
-pub async fn record_message_edit(
-    ctx: &sere::Context,
-    message: &sere::Message,
+pub fn ensure_worker_started(ctx: &sere::Context, data: &crate::Data) {
+    if data.archive_worker_started.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let ctx = ctx.clone();
+    let pool = data.pool.clone();
+    tokio::spawn(async move { archive_worker(ctx, pool).await });
+}
+
+pub async fn enqueue_message(
     pool: &sqlx::PgPool,
+    message: &sere::Message,
+    is_edit: bool,
 ) -> Result<(), Error> {
-    record_message_version(ctx, message, pool, true).await
+    let payload = serde_json::to_value(ArchivePayload::Message(Box::new(message.clone())))?;
+    enqueue_payload(pool, message.id.get() as i64, is_edit, payload).await
+}
+
+pub async fn enqueue_message_fetch(
+    pool: &sqlx::PgPool,
+    channel_id: sere::ChannelId,
+    message_id: sere::MessageId,
+    guild_id: Option<sere::GuildId>,
+) -> Result<(), Error> {
+    let payload = serde_json::to_value(ArchivePayload::Fetch {
+        channel_id: channel_id.get(),
+        message_id: message_id.get(),
+        guild_id: guild_id.map(|id| id.get()),
+    })?;
+    enqueue_payload(pool, message_id.get() as i64, true, payload).await
+}
+
+async fn enqueue_payload(
+    pool: &sqlx::PgPool,
+    message_id: i64,
+    is_edit: bool,
+    payload: serde_json::Value,
+) -> Result<(), Error> {
+    sqlx::query(
+        "INSERT INTO archive_queue (message_id, is_edit, payload)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(message_id)
+    .bind(is_edit)
+    .bind(payload)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn archive_worker(ctx: sere::Context, pool: sqlx::PgPool) {
+    loop {
+        match claim_next(&pool).await {
+            Ok(Some((event_id, is_edit, payload))) => {
+                let result = process_event(&ctx, &pool, event_id, is_edit, payload).await;
+                match result {
+                    Ok(()) => {
+                        if let Err(error) = sqlx::query("DELETE FROM archive_queue WHERE id = $1")
+                            .bind(event_id)
+                            .execute(&pool)
+                            .await
+                        {
+                            error!("Could not remove completed archive event {event_id}: {error}");
+                        }
+                    }
+                    Err(error) => {
+                        error!("Archive event {event_id} failed: {error}");
+                        if let Err(update_error) =
+                            mark_failed(&pool, event_id, &error.to_string()).await
+                        {
+                            error!("Could not reschedule archive event {event_id}: {update_error}");
+                        }
+                    }
+                }
+            }
+            Ok(None) => tokio::time::sleep(Duration::from_secs(2)).await,
+            Err(error) => {
+                error!("Could not claim an archive event: {error}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        }
+    }
+}
+
+async fn process_event(
+    ctx: &sere::Context,
+    pool: &sqlx::PgPool,
+    event_id: i64,
+    is_edit: bool,
+    payload: serde_json::Value,
+) -> Result<(), Error> {
+    let message = match serde_json::from_value::<ArchivePayload>(payload)? {
+        ArchivePayload::Message(message) => *message,
+        ArchivePayload::Fetch {
+            channel_id,
+            message_id,
+            guild_id,
+        } => {
+            let mut message = sere::ChannelId::new(channel_id)
+                .message(ctx, sere::MessageId::new(message_id))
+                .await?;
+            if message.guild_id.is_none() {
+                message.guild_id = guild_id.map(sere::GuildId::new);
+            }
+            message
+        }
+    };
+    if message.guild_id.is_none() {
+        return Err(std::io::Error::other("Archived message has no server ID").into());
+    }
+    record_message_version(ctx, &message, pool, is_edit, event_id).await
+}
+
+async fn claim_next(
+    pool: &sqlx::PgPool,
+) -> Result<Option<(i64, bool, serde_json::Value)>, sqlx::Error> {
+    sqlx::query_as(
+        "UPDATE archive_queue
+         SET attempts = attempts + 1, locked_until = NOW() + INTERVAL '5 minutes'
+         WHERE id = (
+             SELECT id FROM archive_queue
+             WHERE failed_at IS NULL
+               AND available_at <= NOW()
+               AND (locked_until IS NULL OR locked_until <= NOW())
+             ORDER BY available_at, id
+             FOR UPDATE SKIP LOCKED
+             LIMIT 1
+         )
+         RETURNING id, is_edit, payload",
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+async fn mark_failed(pool: &sqlx::PgPool, event_id: i64, message: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE archive_queue
+         SET last_error = $2,
+             locked_until = NULL,
+             available_at = NOW() + LEAST(POWER(2, attempts), 300) * INTERVAL '1 second',
+             failed_at = CASE WHEN attempts >= $3 THEN NOW() ELSE NULL END
+         WHERE id = $1",
+    )
+    .bind(event_id)
+    .bind(message)
+    .bind(MAX_ARCHIVE_ATTEMPTS)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn record_message_version(
@@ -23,6 +172,7 @@ async fn record_message_version(
     message: &sere::Message,
     pool: &sqlx::PgPool,
     is_edit: bool,
+    source_event_id: i64,
 ) -> Result<(), Error> {
     let Some(guild_id) = message.guild_id else {
         trace!("Ignoring message {} without a server", message.id.get());
@@ -60,6 +210,17 @@ async fn record_message_version(
     let author_id = message.author.id.get() as i64;
     let timestamp = message.timestamp.to_string();
     let mut transaction = pool.begin().await?;
+
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM message_versions WHERE source_event_id = $1)",
+    )
+    .bind(source_event_id)
+    .fetch_one(&mut *transaction)
+    .await?
+    {
+        transaction.commit().await?;
+        return Ok(());
+    }
 
     sqlx::query(
         "INSERT INTO guilds (guild_id, guild_name, guild_icon_url)
@@ -181,6 +342,34 @@ async fn record_message_version(
     .execute(&mut *transaction)
     .await?;
 
+    sqlx::query("SELECT message_id FROM messages WHERE message_id = $1 FOR UPDATE")
+        .bind(message_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM message_versions WHERE source_event_id = $1)",
+    )
+    .bind(source_event_id)
+    .fetch_one(&mut *transaction)
+    .await?
+    {
+        transaction.commit().await?;
+        return Ok(());
+    }
+
+    if !is_edit
+        && sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM message_versions WHERE message_id = $1)",
+        )
+        .bind(message_id)
+        .fetch_one(&mut *transaction)
+        .await?
+    {
+        transaction.commit().await?;
+        return Ok(());
+    }
+
     let message_version = if is_edit {
         sqlx::query_scalar::<_, i64>(
             "SELECT COALESCE(MAX(version), 0) + 1
@@ -195,14 +384,13 @@ async fn record_message_version(
     };
 
     sqlx::query(
-        "INSERT INTO message_versions (message_id, version, content)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (message_id, version) DO UPDATE SET
-             content = EXCLUDED.content;",
+        "INSERT INTO message_versions (message_id, version, content, source_event_id)
+         VALUES ($1, $2, $3, $4)",
     )
     .bind(message_id)
     .bind(message_version)
     .bind(&message.content)
+    .bind(source_event_id)
     .execute(&mut *transaction)
     .await?;
 

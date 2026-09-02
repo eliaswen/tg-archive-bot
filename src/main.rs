@@ -1,5 +1,6 @@
 use poise::serenity_prelude as sere;
 use std::env;
+use std::sync::{Arc, atomic::AtomicBool};
 use tracing::{debug, error, info, trace};
 use tracing_subscriber::EnvFilter;
 mod archive_stats;
@@ -8,6 +9,7 @@ mod web;
 
 pub struct Data {
     pub pool: sqlx::PgPool,
+    pub archive_worker_started: Arc<AtomicBool>,
 }
 
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -132,7 +134,10 @@ async fn main() {
                 } else {
                     poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 }
-                Ok(Data { pool: pool.clone() })
+                Ok(Data {
+                    pool: pool.clone(),
+                    archive_worker_started: Arc::new(AtomicBool::new(false)),
+                })
             })
         })
         .build();

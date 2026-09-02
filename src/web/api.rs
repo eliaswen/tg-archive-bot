@@ -11,6 +11,7 @@ use axum::{
 };
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     env,
@@ -23,9 +24,11 @@ use tower_sessions::Session;
 const RESULTS_PER_PAGE: i64 = 100;
 const TOKEN_RATE_LIMIT: Duration = Duration::from_secs(5 * 60);
 
+type PermissionCacheEntries = HashMap<i64, (Instant, Vec<ChannelAccess>)>;
+
 #[derive(Clone, Default)]
 pub(super) struct ApiPermissionCache {
-    users: Arc<Mutex<HashMap<i64, (Instant, Vec<ChannelAccess>)>>>,
+    users: Arc<Mutex<PermissionCacheEntries>>,
 }
 
 impl ApiPermissionCache {
@@ -129,6 +132,7 @@ impl TokenRateLimiter {
 
 #[derive(Clone)]
 struct ApiUser {
+    token_id: i64,
     discord_id: i64,
     channel_ids: Vec<i64>,
 }
@@ -144,7 +148,21 @@ struct MeResponse {
 }
 #[derive(Serialize)]
 struct TokenResponse {
+    id: i64,
     token: String,
+}
+#[derive(Default, Deserialize)]
+struct CreateTokenQuery {
+    valid_from: Option<i64>,
+    valid_to: Option<i64>,
+}
+#[derive(Serialize, sqlx::FromRow)]
+struct TokenInfoResponse {
+    id: i64,
+    created_at: i64,
+    valid_from: Option<i64>,
+    valid_to: Option<i64>,
+    last_used_at: Option<i64>,
 }
 #[derive(Serialize)]
 struct ServerResponse {
@@ -264,7 +282,6 @@ struct VersionQuery {
 struct SearchQuery {
     #[serde(default)]
     q: String,
-    page: Option<i64>,
     limit: Option<i64>,
     filter: Option<String>,
 }
@@ -341,12 +358,15 @@ pub(super) fn router(data: WebData) -> Router {
         .route("/search/timestamp", get(search_timestamp))
         .route("/search/content", get(search_content))
         .route("/metadata", get(metadata_lookup))
+        .route("/token/info", get(token_info))
+        .route("/token/revoke", post(revoke_token))
         .route_layer(middleware::from_fn_with_state(
             data.clone(),
             require_api_user,
         ));
     Router::new()
         .route("/token", post(create_token))
+        .route("/healthcheck", get(healthcheck))
         .merge(protected)
         .with_state(data)
 }
@@ -359,21 +379,29 @@ async fn require_api_user(
     let Some(token) = bearer_token(request.headers().get(header::AUTHORIZATION)) else {
         return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
     };
-    let discord_id =
-        match sqlx::query_scalar::<_, i64>("SELECT discord_id FROM api_tokens WHERE token = $1")
-            .bind(token)
-            .fetch_optional(&data.pool)
-            .await
-        {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
-            }
-            Err(error) => {
-                tracing::error!("API token lookup failed: {}", error);
-                return api_error(StatusCode::INTERNAL_SERVER_ERROR, "database error");
-            }
-        };
+    let token_hash = token_hash(token);
+    let identity = match sqlx::query_as::<_, (i64, i64)>(
+        "UPDATE api_tokens
+             SET last_used_at = NOW()
+             WHERE token_hash = $1
+               AND (valid_from IS NULL OR valid_from <= NOW())
+               AND (valid_to IS NULL OR valid_to >= NOW())
+             RETURNING id, discord_id",
+    )
+    .bind(token_hash)
+    .fetch_optional(&data.pool)
+    .await
+    {
+        Ok(Some(identity)) => identity,
+        Ok(None) => {
+            return api_error(StatusCode::UNAUTHORIZED, "invalid or missing bearer token");
+        }
+        Err(error) => {
+            tracing::error!("API token lookup failed: {}", error);
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "database error");
+        }
+    };
+    let (token_id, discord_id) = identity;
     let channel_ids = match cached_accessible_channels(&data, discord_id).await {
         Ok(access) => access
             .into_iter()
@@ -388,6 +416,7 @@ async fn require_api_user(
         }
     };
     request.extensions_mut().insert(ApiUser {
+        token_id,
         discord_id,
         channel_ids,
     });
@@ -399,6 +428,7 @@ async fn create_token(
     session: Session,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
+    Query(query): Query<CreateTokenQuery>,
 ) -> Response {
     let user = match session.get::<WebUser>("user").await {
         Ok(Some(user)) => user,
@@ -408,6 +438,19 @@ async fn create_token(
     let client_ip = data.token_rate_limiter.client_ip(peer.ip(), &headers);
     if let Err(retry_after) = data.token_rate_limiter.check(client_ip) {
         return rate_limited(retry_after);
+    }
+    if query
+        .valid_from
+        .zip(query.valid_to)
+        .is_some_and(|(valid_from, valid_to)| valid_from > valid_to)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "valid_from must not exceed valid_to",
+        );
+    }
+    if !valid_unix_timestamp(query.valid_from) || !valid_unix_timestamp(query.valid_to) {
+        return api_error(StatusCode::BAD_REQUEST, "invalid Unix timestamp");
     }
     let token: String = rand::rng()
         .sample_iter(&Alphanumeric)
@@ -431,18 +474,73 @@ async fn create_token(
     if let Err(error_value) = result {
         return database(error_value).into_response();
     }
-    let result = sqlx::query("INSERT INTO api_tokens (token, discord_id) VALUES ($1, $2)")
-        .bind(&token)
-        .bind(user.id)
-        .execute(&mut *transaction)
-        .await;
-    if let Err(error_value) = result {
-        return database(error_value).into_response();
-    }
+    let result = sqlx::query_scalar::<_, i64>(
+        "INSERT INTO api_tokens (token_hash, discord_id, valid_from, valid_to)
+         VALUES ($1, $2, TO_TIMESTAMP($3), TO_TIMESTAMP($4))
+         RETURNING id",
+    )
+    .bind(token_hash(&token))
+    .bind(user.id)
+    .bind(query.valid_from.map(|value| value as f64))
+    .bind(query.valid_to.map(|value| value as f64))
+    .fetch_one(&mut *transaction)
+    .await;
+    let token_id = match result {
+        Ok(token_id) => token_id,
+        Err(error_value) => return database(error_value).into_response(),
+    };
     if let Err(error_value) = transaction.commit().await {
         return database(error_value).into_response();
     }
-    Json(TokenResponse { token }).into_response()
+    Json(TokenResponse {
+        id: token_id,
+        token,
+    })
+    .into_response()
+}
+
+async fn token_info(
+    State(data): State<WebData>,
+    Extension(user): Extension<ApiUser>,
+) -> ApiResult<Vec<TokenInfoResponse>> {
+    let tokens = sqlx::query_as::<_, TokenInfoResponse>(
+        "SELECT id,
+                FLOOR(EXTRACT(EPOCH FROM created_at))::bigint AS created_at,
+                FLOOR(EXTRACT(EPOCH FROM valid_from))::bigint AS valid_from,
+                FLOOR(EXTRACT(EPOCH FROM valid_to))::bigint AS valid_to,
+                FLOOR(EXTRACT(EPOCH FROM last_used_at))::bigint AS last_used_at
+         FROM api_tokens
+         WHERE discord_id = $1
+         ORDER BY created_at, id",
+    )
+    .bind(user.discord_id)
+    .fetch_all(&data.pool)
+    .await
+    .map_err(database)?;
+    Ok(Json(tokens))
+}
+
+async fn revoke_token(
+    State(data): State<WebData>,
+    Extension(user): Extension<ApiUser>,
+) -> Response {
+    match sqlx::query("DELETE FROM api_tokens WHERE id = $1 AND discord_id = $2")
+        .bind(user.token_id)
+        .bind(user.discord_id)
+        .execute(&data.pool)
+        .await
+    {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(error_value) => database(error_value).into_response(),
+    }
+}
+
+fn token_hash(token: &str) -> Vec<u8> {
+    Sha256::digest(token.as_bytes()).to_vec()
+}
+
+fn valid_unix_timestamp(value: Option<i64>) -> bool {
+    value.is_none_or(|value| chrono::DateTime::from_timestamp(value, 0).is_some())
 }
 
 async fn me(Extension(user): Extension<ApiUser>) -> Json<MeResponse> {
@@ -885,6 +983,10 @@ fn rate_limited(retry_after: u64) -> Response {
     response
 }
 
+async fn healthcheck() -> impl IntoResponse {
+    (StatusCode::OK, "ok")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,6 +1008,18 @@ mod tests {
         assert_eq!(bearer_token(Some(&header)), Some("secret-token"));
         let lowercase = axum::http::HeaderValue::from_static("bearer another-token");
         assert_eq!(bearer_token(Some(&lowercase)), Some("another-token"));
+    }
+    #[test]
+    fn hashes_tokens_deterministically_without_storing_the_secret() {
+        assert_eq!(token_hash("secret-token"), token_hash("secret-token"));
+        assert_ne!(token_hash("secret-token"), b"secret-token");
+    }
+
+    #[test]
+    fn validates_token_validity_timestamps() {
+        assert!(valid_unix_timestamp(None));
+        assert!(valid_unix_timestamp(Some(0)));
+        assert!(!valid_unix_timestamp(Some(i64::MAX)));
     }
     #[test]
     fn rejects_invalid_authorization_headers() {
