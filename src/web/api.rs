@@ -2,12 +2,7 @@ use super::{
     CHANNEL_ACCESS_TTL_SECONDS, ChannelAccess, WebData, WebUser, accessible_channels, safe_filename,
 };
 use axum::{
-    Extension, Json, Router,
-    extract::{ConnectInfo, Path, Query, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-    routing::{get, post},
+    Extension, Json, Router, extract::{ConnectInfo, Path, Query, Request, State}, http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header}, middleware::{self, Next}, response::{IntoResponse, Response}, routing::{get, post},
 };
 use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -410,6 +405,10 @@ pub(super) fn router(data: WebData) -> Router {
         .route("/token", post(create_token))
         .route("/healthcheck", get(healthcheck))
         .merge(protected)
+        .route_layer(middleware::from_fn_with_state(
+            data.clone(),
+            set_security_headers,
+        ))
         .with_state(data)
 }
 
@@ -1174,6 +1173,22 @@ fn rate_limited(retry_after: u64) -> Response {
     response.headers_mut().insert(
         header::RETRY_AFTER,
         HeaderValue::from_str(&retry_after.to_string()).unwrap(),
+    );
+    response
+}
+
+async fn set_security_headers(
+    request: Request,
+    next: Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
     );
     response
 }

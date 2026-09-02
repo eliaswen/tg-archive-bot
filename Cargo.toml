@@ -8,6 +8,7 @@ authors = ["Elias Wendland <eliaswendland@pm.me>"]
 readme = "README.md"
 repository = "https://git.ewenlau.net/ewenlau/tg-archive-bot"
 homepage = "https://git.ewenlau.net/ewenlau/tg-archive-bot"
+default-run = "tg-archive-bot"
 
 [dependencies]
 askama = "=0.16.0"
