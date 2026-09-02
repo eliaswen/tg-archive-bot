@@ -1,4 +1,15 @@
 <h2>Log in</h2>
+{% if let Some(error) = error %}
+    <div style="
+        background-color: #fee2e2;
+        color: #991b1b;
+        border: 1px solid #ef4444;
+        border-radius: 6px;
+        padding: 12px 16px;
+        margin: 12px 0;">
+        {{ error }}
+    </div>
+{% endif %}
 <p>It is required to log in with Discord to view the archive.</p>
 <p>The login happens on the official Discord website. This site does not have access to your email or password.</p>
 <form method="get" action="/login/discord">

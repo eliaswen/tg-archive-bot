@@ -90,7 +90,9 @@ struct TimezoneContext {
 
 #[derive(Template)]
 #[template(path = "login.html")]
-struct LoginTemplate;
+struct LoginTemplate<'a> {
+    error: Option<&'a str>,
+}
 
 #[derive(Template)]
 #[template(path = "privacy.html")]
@@ -433,8 +435,15 @@ struct ErrorTemplate<'a> {
 }
 
 #[derive(Deserialize)]
+struct LoginQuery {
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct OAuthQuery {
-    code: String,
+    code: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
     state: String,
 }
 
@@ -989,6 +998,15 @@ mod tests {
         assert!(html.contains("&#60;script&#62;&#39;&#34;&#38;&#60;/script&#62;"));
         assert!(html.contains("&#60;old&#62;"));
         assert!(html.contains("&#60;new&#62;"));
+    }
+
+    #[test]
+    fn login_page_renders_and_escapes_query_error() {
+        let html = render_template(&LoginTemplate {
+            error: Some("Login failed: <try again>"),
+        });
+
+        assert!(html.contains("Login failed: &#60;try again&#62;"));
     }
 
     #[test]

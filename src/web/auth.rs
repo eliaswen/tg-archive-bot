@@ -156,12 +156,14 @@ pub(super) async fn request_is_allowed(pool: &PgPool, user: &WebUser, path: &str
     channel_id.is_some_and(|channel_id| user.channel_ids.contains(&channel_id))
 }
 
-pub(super) async fn login(session: Session) -> Response {
+pub(super) async fn login(session: Session, Query(query): Query<LoginQuery>) -> Response {
     match session.get::<WebUser>("user").await {
         Ok(Some(_)) => Redirect::to("/").into_response(),
         Ok(None) => Html(render_page(
             "Log in",
-            &render_template(&LoginTemplate),
+            &render_template(&LoginTemplate {
+                error: query.error.as_deref(),
+            }),
             false,
         ))
         .into_response(),
@@ -354,6 +356,9 @@ pub(super) async fn discord_callback(
     session: Session,
     Query(query): Query<OAuthQuery>,
 ) -> Response {
+    if !query.code.is_some() {
+        return oauth2_error_handling(query.error.as_deref().unwrap_or("none"));
+    }
     let state = session.remove::<String>("oauth_state").await;
     if !matches!(state, Ok(Some(state)) if state == query.state) {
         return (StatusCode::BAD_REQUEST, "Invalid OAuth state").into_response();
@@ -365,7 +370,7 @@ pub(super) async fn discord_callback(
             ("client_id", data.client_id.as_str()),
             ("client_secret", data.client_secret.as_str()),
             ("grant_type", "authorization_code"),
-            ("code", query.code.as_str()),
+            ("code", query.code.expect("Missing code in query").as_str()),
             ("redirect_uri", data.redirect_uri.as_str()),
         ])
         .send()
@@ -422,6 +427,46 @@ pub(super) async fn discord_callback(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     Redirect::to("/").into_response()
+}
+
+fn oauth2_error_handling(error_code: &str) -> Response {
+    return match error_code {
+        "access_denied" => Redirect::to(
+            "/login?error=You denied the request. Please log in again and hit Authorize to continue."
+        ).into_response(),
+
+        "invalid_request" => Redirect::to(
+            "/login?error=Error code: invalid_request. Please try again. If this keeps happening, report this issue."
+        ).into_response(),
+
+        "unauthorized_client" => Redirect::to(
+            "/login?error=Error code: unauthorized_client. Please try again. If this keeps happening, report this issue."
+        ).into_response(),
+
+        "unsupported_response_type" => Redirect::to(
+            "/login?error=Error code: unsupported_response_type. Please try again. If this keeps happening, report this issue."
+        ).into_response(),
+
+        "invalid_scope" => Redirect::to(
+            "/login?error=Error code: invalid_scope. Please try again. If this keeps happening, report this issue. Also if this is just you messing with the oauth2 scope, stop."
+        ).into_response(),
+
+        "server_error" => Redirect::to(
+            "/login?error=Discord encountered an internal error. Please try again."
+        ).into_response(),
+
+        "temporarily_unavailable" => Redirect::to(
+            "/login?error=Discord authentication is temporarily unavailable. Please try again later and check discordstatus.com for updates."
+        ).into_response(),
+
+        "none" => Redirect::to(
+            "/login?error=Error code: none. Please try again. If this keeps happening, report this issue. Also if this is just you messing with the oauth2 scope, stop."
+        ).into_response(),
+
+        _ =>  Redirect::to(
+            "/login?error=Error code: unknown. Please try again. If this keeps happening, report this issue."
+        ).into_response(),
+    };
 }
 
 pub(super) async fn logout(session: Session) -> Redirect {
