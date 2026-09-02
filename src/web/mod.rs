@@ -18,7 +18,8 @@ use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tower_sessions::{Expiry, MemoryStore, Session, SessionManagerLayer, cookie::time::Duration};
+use tower_sessions::{Expiry, Session, SessionManagerLayer, cookie::time::Duration};
+use tower_sessions_redis_store::{RedisStore, fred::prelude::*};
 use tracing::{error, info};
 
 pub use crate::archive_stats::format_bytes;
@@ -42,6 +43,7 @@ struct WebData {
     client_id: String,
     client_secret: String,
     redirect_uri: String,
+    redis: Pool,
     token_rate_limiter: api::TokenRateLimiter,
     api_permission_cache: api::ApiPermissionCache,
 }
@@ -573,8 +575,18 @@ pub async fn run(
     client_id: String,
     client_secret: String,
     redirect_uri: String,
+    redis_url: String,
 ) {
-    let token_rate_limiter = api::TokenRateLimiter::from_env()
+    let redis = Pool::new(
+        Config::from_url(&redis_url).expect("Invalid TG_BOT_REDIS_URL configuration"),
+        None,
+        None,
+        None,
+        6,
+    ).expect("Failed to configure Redis pool");
+    let redis_connection = redis.connect();
+    redis.wait_for_connect().await.expect("Failed to connect to Redis");
+    let token_rate_limiter = api::TokenRateLimiter::from_env(redis.clone())
         .expect("Invalid TG_BOT_TRUSTED_PROXY_RANGES configuration");
     let data = WebData {
         pool,
@@ -583,8 +595,9 @@ pub async fn run(
         client_id,
         client_secret,
         redirect_uri,
+        redis: redis.clone(),
         token_rate_limiter,
-        api_permission_cache: api::ApiPermissionCache::default(),
+        api_permission_cache: api::ApiPermissionCache::new(redis.clone()),
     };
     let archive = Router::new()
         .route("/", get(index))
@@ -614,7 +627,7 @@ pub async fn run(
             get(anonymize_confirmation).post(anonymize_all),
         )
         .route_layer(middleware::from_fn_with_state(data.clone(), require_user));
-    let sessions = SessionManagerLayer::new(MemoryStore::default())
+    let sessions = SessionManagerLayer::new(RedisStore::new(redis))
         .with_secure(!data.redirect_uri.starts_with("http://"))
         .with_same_site(tower_sessions::cookie::SameSite::Lax)
         .with_expiry(Expiry::OnInactivity(Duration::hours(12)));
@@ -646,6 +659,7 @@ pub async fn run(
     {
         error!("Web server error: {}", error);
     }
+    redis_connection.abort();
 }
 
 struct Pagination {

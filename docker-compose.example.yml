@@ -16,28 +16,65 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-  tg-archive-bot:
+  redis:
+    image: redis:8-alpine
+    container_name: tg-archive-bot-redis
+    restart: always
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+  bot:
     build:
       context: .
       dockerfile: Dockerfile
+    image: tg-archive-bot:latest
     # OR pull from registry
     # image: git.ewenlau.net/ewenlau/tg-archive-bot:latest
     # image: git.ewenlau.net/ewenlau/tg-archive-bot:dev
     container_name: tg-archive-bot
     restart: always
-    ports:
-      - "3000:3000"
+    command: [ "bot" ]
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    environment:
+      TG_BOT_DISCORD_TOKEN: YOUR_DISCORD_TOKEN_HERE
+      TG_BOT_DATABASE_URL: postgres://postgres:YOUR_POSTGRES_PASSWORD_HERE@postgres:5432/tg_archive_bot
+      TG_BOT_LOG: info
+  web:
+    image: tg-archive-bot:latest
+    # OR pull the same image used by the bot from the registry
+    # image: git.ewenlau.net/ewenlau/tg-archive-bot:latest
+    # image: git.ewenlau.net/ewenlau/tg-archive-bot:dev
+    restart: always
+    command: [ "web" ]
+    expose:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       TG_BOT_DISCORD_TOKEN: YOUR_DISCORD_TOKEN_HERE
       TG_BOT_DISCORD_CLIENT_ID: YOUR_DISCORD_CLIENT_ID_HERE
       TG_BOT_DISCORD_CLIENT_SECRET: YOUR_DISCORD_CLIENT_SECRET_HERE
       TG_BOT_DISCORD_REDIRECT_URI: http://localhost:3000/login/discord/callback
       TG_BOT_DATABASE_URL: postgres://postgres:YOUR_POSTGRES_PASSWORD_HERE@postgres:5432/tg_archive_bot
+      TG_BOT_REDIS_URL: redis://redis:6379
       TG_BOT_LOG: info
       TG_BOT_WEB_ADDRESS: 0.0.0.0:3000
-
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:3000/api/v1/healthcheck" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 volumes:
   postgres_data:
+    driver: local
+  redis_data:
     driver: local

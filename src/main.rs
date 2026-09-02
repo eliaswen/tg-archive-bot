@@ -36,27 +36,16 @@ async fn main() {
 
     trace!("Env loaded");
 
+    let process = env::args().nth(1).unwrap_or_else(|| "bot".to_string());
+    if process != "bot" && process != "web" {
+        error!("Expected process to be `bot` or `web`");
+        std::process::exit(2);
+    }
+
     trace!("Loading database url");
     let database_url =
         env::var("TG_BOT_DATABASE_URL").expect("Expected a database url in the environment");
     trace!("Database url loaded");
-
-    trace!("Loading token");
-    let token = env::var("TG_BOT_DISCORD_TOKEN").expect("Expected a token in the environment");
-    trace!("Token loaded");
-
-    trace!("Loading web address");
-    let web_address = env::var("TG_BOT_WEB_ADDRESS").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
-    trace!("Web address loaded");
-
-    let discord_client_id = env::var("TG_BOT_DISCORD_CLIENT_ID")
-        .expect("Expected a Discord client ID in the environment");
-    let discord_client_secret = env::var("TG_BOT_DISCORD_CLIENT_SECRET")
-        .expect("Expected a Discord client secret in the environment");
-    let discord_redirect_uri = env::var("TG_BOT_DISCORD_REDIRECT_URI")
-        .expect("Expected a Discord redirect URI in the environment");
-
-    info!("Starting bot...");
 
     debug!("Initalizing database");
     let pool = connect_database(&database_url)
@@ -71,19 +60,43 @@ async fn main() {
         .expect("Failed to apply database migrations");
     debug!("Migrations applied");
 
+    if process == "web" {
+        run_web(pool).await;
+        return;
+    }
+
+    run_bot(pool).await;
+}
+
+async fn run_web(pool: sqlx::PgPool) {
+    let token = env::var("TG_BOT_DISCORD_TOKEN").expect("Expected a token in the environment");
+    let web_address = env::var("TG_BOT_WEB_ADDRESS").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    let redis_url = env::var("TG_BOT_REDIS_URL").expect("Expected a Redis URL in the environment");
+    let discord_client_id = env::var("TG_BOT_DISCORD_CLIENT_ID")
+        .expect("Expected a Discord client ID in the environment");
+    let discord_client_secret = env::var("TG_BOT_DISCORD_CLIENT_SECRET")
+        .expect("Expected a Discord client secret in the environment");
+    let discord_redirect_uri = env::var("TG_BOT_DISCORD_REDIRECT_URI")
+        .expect("Expected a Discord redirect URI in the environment");
+
     debug!("Starting web server on {}", web_address);
     let web_listener = tokio::net::TcpListener::bind(&web_address)
         .await
         .expect("Failed to bind web server");
-    tokio::spawn(web::run(
+    web::run(
         web_listener,
-        pool.clone(),
-        token.clone(),
+        pool,
+        token,
         discord_client_id,
         discord_client_secret,
         discord_redirect_uri,
-    ));
-    debug!("Web server started");
+        redis_url,
+    ).await;
+}
+
+async fn run_bot(pool: sqlx::PgPool) {
+    let token = env::var("TG_BOT_DISCORD_TOKEN").expect("Expected a token in the environment");
+    info!("Starting bot...");
 
     trace!("Loading intents");
     let intents = sere::GatewayIntents::non_privileged()

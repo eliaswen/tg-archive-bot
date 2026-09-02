@@ -13,48 +13,48 @@ use rand::{RngExt, distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
     env,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::Arc,
+    time::Duration,
 };
 use tower_sessions::Session;
+use tower_sessions_redis_store::fred::{error::{Error as RedisError, ErrorKind as RedisErrorKind}, prelude::*, types::{Expiration, SetOptions}};
 
 const RESULTS_PER_PAGE: i64 = 100;
 const TOKEN_RATE_LIMIT: Duration = Duration::from_secs(5 * 60);
 
-type PermissionCacheEntries = HashMap<i64, (Instant, Vec<ChannelAccess>)>;
-
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(super) struct ApiPermissionCache {
-    users: Arc<Mutex<PermissionCacheEntries>>,
+    redis: Pool,
 }
 
 impl ApiPermissionCache {
-    fn get_at(&self, discord_id: i64, now: Instant) -> Option<Vec<ChannelAccess>> {
-        let mut users = self.users.lock().unwrap_or_else(|error| error.into_inner());
-        users.retain(|_, (refreshed_at, _)| {
-            now.saturating_duration_since(*refreshed_at).as_secs() < CHANNEL_ACCESS_TTL_SECONDS
-        });
-        users
-            .get(&discord_id)
-            .map(|(_, channel_access)| channel_access.clone())
+    pub(super) fn new(redis: Pool) -> Self {
+        Self { redis }
     }
 
-    fn get(&self, discord_id: i64) -> Option<Vec<ChannelAccess>> {
-        self.get_at(discord_id, Instant::now())
+    fn key(discord_id: i64) -> String {
+        format!("api-permissions:{discord_id}")
     }
 
-    fn insert_at(&self, discord_id: i64, channel_access: Vec<ChannelAccess>, now: Instant) {
-        self.users
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(discord_id, (now, channel_access));
+    async fn get(&self, discord_id: i64) -> Result<Option<Vec<ChannelAccess>>, RedisError> {
+        let value = self.redis.get::<Option<String>, _>(Self::key(discord_id)).await?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(|error| RedisError::new(RedisErrorKind::Parse, error.to_string())))
+            .transpose()
     }
 
-    fn insert(&self, discord_id: i64, channel_access: Vec<ChannelAccess>) {
-        self.insert_at(discord_id, channel_access, Instant::now());
+    async fn insert(&self, discord_id: i64, channel_access: &[ChannelAccess]) -> Result<(), RedisError> {
+        let value = serde_json::to_string(channel_access)
+            .map_err(|error| RedisError::new(RedisErrorKind::Parse, error.to_string()))?;
+        self.redis.set(
+            Self::key(discord_id),
+            value,
+            Some(Expiration::EX(CHANNEL_ACCESS_TTL_SECONDS as i64)),
+            None,
+            false,
+        ).await
     }
 }
 
@@ -62,24 +62,28 @@ async fn cached_accessible_channels(
     data: &WebData,
     discord_id: i64,
 ) -> Result<Vec<ChannelAccess>, Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(channel_access) = data.api_permission_cache.get(discord_id) {
+    if let Some(channel_access) = data.api_permission_cache.get(discord_id).await? {
         return Ok(channel_access);
     }
 
     let channel_access = accessible_channels(data, discord_id).await?;
     data.api_permission_cache
-        .insert(discord_id, channel_access.clone());
+        .insert(discord_id, &channel_access).await?;
     Ok(channel_access)
 }
 
 #[derive(Clone)]
 pub(super) struct TokenRateLimiter {
-    attempts: Arc<Mutex<HashMap<IpAddr, Instant>>>,
+    redis: Pool,
     trusted_proxies: Arc<Vec<ipnet::IpNet>>,
 }
 
 impl TokenRateLimiter {
-    pub(super) fn from_env() -> Result<Self, String> {
+    fn key(ip: IpAddr) -> String {
+        format!("token-rate-limit:{ip}")
+    }
+
+    pub(super) fn from_env(redis: Pool) -> Result<Self, String> {
         let trusted_proxies = env::var("TG_BOT_TRUSTED_PROXY_RANGES")
             .unwrap_or_default()
             .split(',')
@@ -93,7 +97,7 @@ impl TokenRateLimiter {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            attempts: Arc::new(Mutex::new(HashMap::new())),
+            redis,
             trusted_proxies: Arc::new(trusted_proxies),
         })
     }
@@ -114,19 +118,20 @@ impl TokenRateLimiter {
         }
     }
 
-    fn check(&self, ip: IpAddr) -> Result<(), u64> {
-        let now = Instant::now();
-        let mut attempts = self
-            .attempts
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        attempts.retain(|_, attempt| now.duration_since(*attempt) < TOKEN_RATE_LIMIT);
-        if let Some(attempt) = attempts.get(&ip) {
-            let remaining = TOKEN_RATE_LIMIT.saturating_sub(now.duration_since(*attempt));
-            return Err(remaining.as_secs().max(1));
+    async fn check(&self, ip: IpAddr) -> Result<Result<(), u64>, RedisError> {
+        let key = Self::key(ip);
+        let created = self.redis.set::<bool, _, _>(
+            &key,
+            "1",
+            Some(Expiration::EX(TOKEN_RATE_LIMIT.as_secs() as i64)),
+            Some(SetOptions::NX),
+            false,
+        ).await?;
+        if !created {
+            let remaining = self.redis.ttl::<i64, _>(key).await?;
+            return Ok(Err(remaining.max(1) as u64));
         }
-        attempts.insert(ip, now);
-        Ok(())
+        Ok(Ok(()))
     }
 }
 
@@ -436,8 +441,13 @@ async fn create_token(
         Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "session error"),
     };
     let client_ip = data.token_rate_limiter.client_ip(peer.ip(), &headers);
-    if let Err(retry_after) = data.token_rate_limiter.check(client_ip) {
-        return rate_limited(retry_after);
+    match data.token_rate_limiter.check(client_ip).await {
+        Ok(Ok(())) => {}
+        Ok(Err(retry_after)) => return rate_limited(retry_after),
+        Err(error) => {
+            tracing::error!("Token rate limit check failed: {}", error);
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, "rate limiter unavailable");
+        }
     }
     if query
         .valid_from
@@ -983,8 +993,16 @@ fn rate_limited(retry_after: u64) -> Response {
     response
 }
 
-async fn healthcheck() -> impl IntoResponse {
-    (StatusCode::OK, "ok")
+async fn healthcheck(State(data): State<WebData>) -> impl IntoResponse {
+    let database = sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&data.pool)
+        .await;
+    let redis = data.redis.ping::<String>(None).await;
+    if database.is_ok() && redis.is_ok() {
+        (StatusCode::OK, "ok")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "unhealthy")
+    }
 }
 
 #[cfg(test)]
@@ -993,7 +1011,7 @@ mod tests {
 
     fn limiter(trusted_proxies: &[&str]) -> TokenRateLimiter {
         TokenRateLimiter {
-            attempts: Arc::new(Mutex::new(HashMap::new())),
+            redis: Pool::new(Config::default(), None, None, None, 1).unwrap(),
             trusted_proxies: Arc::new(
                 trusted_proxies
                     .iter()
@@ -1065,36 +1083,22 @@ mod tests {
     }
 
     #[test]
-    fn limits_repeated_token_creation_by_ip() {
-        let limiter = limiter(&[]);
-        let ip = "192.0.2.5".parse().unwrap();
-        assert_eq!(limiter.check(ip), Ok(()));
-        assert!(limiter.check(ip).is_err());
-        assert_eq!(limiter.check("192.0.2.6".parse().unwrap()), Ok(()));
+    fn namespaces_token_creation_rate_limits_by_ip() {
+        assert_eq!(
+            TokenRateLimiter::key("192.0.2.5".parse().unwrap()),
+            "token-rate-limit:192.0.2.5"
+        );
     }
 
     #[test]
-    fn caches_api_permissions_by_user_id_until_the_ttl_expires() {
-        let cache = ApiPermissionCache::default();
-        let refreshed_at = Instant::now();
+    fn serializes_api_permissions_for_the_shared_cache() {
         let access = vec![ChannelAccess {
             channel_id: 10,
             reason: "test".into(),
         }];
-
-        cache.insert_at(1, access, refreshed_at);
-
-        assert_eq!(
-            cache
-                .get_at(1, refreshed_at + Duration::from_secs(299))
-                .unwrap()[0]
-                .channel_id,
-            10
-        );
-        assert!(
-            cache
-                .get_at(1, refreshed_at + Duration::from_secs(300))
-                .is_none()
-        );
+        let value = serde_json::to_string(&access).unwrap();
+        let cached = serde_json::from_str::<Vec<ChannelAccess>>(&value).unwrap();
+        assert_eq!(ApiPermissionCache::key(1), "api-permissions:1");
+        assert_eq!(cached[0].channel_id, 10);
     }
 }
