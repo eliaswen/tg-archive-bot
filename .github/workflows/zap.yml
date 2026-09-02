@@ -220,7 +220,8 @@ jobs:
                     [{
                       ruleId: .pluginid,
                       level: (if .riskcode == "3" then "error" elif .riskcode == "2" then "warning" else "note" end),
-                      message: {text: (.alert // .name)}
+                      message: {text: (.alert // .name)},
+                      locations: [{physicalLocation: {artifactLocation: {uri: "src/web/api.rs"}}}]
                     }]
                   else
                     [.instances[] | {
@@ -234,7 +235,7 @@ jobs:
               }]
             }
           ' zap-api-reports/zap-report.json > zap-api-reports/zap-report.sarif
-          jq --exit-status '.version == "2.1.0" and (.runs | type == "array")' \
+          jq --exit-status '.version == "2.1.0" and (.runs | type == "array") and all(.runs[].results[]; (.locations[0].physicalLocation.artifactLocation.uri | type) == "string")' \
             zap-api-reports/zap-report.sarif >/dev/null
 
       - name: Upload ZAP API SARIF to GitHub code scanning
@@ -275,21 +276,22 @@ jobs:
                     [{
                       ruleId: .pluginid,
                       level: (if .riskcode == "3" then "error" elif .riskcode == "2" then "warning" else "note" end),
-                      message: {text: (.alert // .name)}
+                      message: {text: (.alert // .name)},
+                      locations: [{physicalLocation: {artifactLocation: {uri: "src/web/mod.rs"}}}]
                     }]
                   else
                     [.instances[] | {
                       ruleId: $alert.pluginid,
                       level: (if $alert.riskcode == "3" then "error" elif $alert.riskcode == "2" then "warning" else "note" end),
                       message: {text: (($alert.alert // $alert.name) + " (" + (.method // "") + " " + (.uri // "") + ")")},
-                      locations: [{logicalLocations: [{name: (.uri // "http://127.0.0.1:3000/")}]}]
+                      locations: [{physicalLocation: {artifactLocation: {uri: "src/web/mod.rs"}}}]
                     }]
                   end
                 ) | flatten)
               }]
             }
           ' zap-ssr-reports/zap-report.json > zap-ssr-reports/zap-report.sarif
-          jq --exit-status '.version == "2.1.0" and (.runs | type == "array")' \
+          jq --exit-status '.version == "2.1.0" and (.runs | type == "array") and all(.runs[].results[]; (.locations[0].physicalLocation.artifactLocation.uri | type) == "string")' \
             zap-ssr-reports/zap-report.sarif >/dev/null
 
       - name: Upload ZAP SSR SARIF to GitHub code scanning
