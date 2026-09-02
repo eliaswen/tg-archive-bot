@@ -6,11 +6,12 @@ use askama::Template;
 use axum::{
     Extension, Form, Json, Router,
     extract::{Path, Query, Request, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode, header, HeaderName, HeaderValue},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
+use tower_http::set_header;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use rand::{distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
@@ -658,6 +659,12 @@ pub async fn run(
         .nest("/api/v1", api)
         .layer(middleware::from_fn(theme_request))
         .layer(middleware::from_fn(timezone_request))
+        .layer(set_header::SetResponseHeaderLayer::overriding(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),))
+        .layer(set_header::SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),))
         .layer(sessions);
 
     info!("Web server listening on {}", listener.local_addr().unwrap());

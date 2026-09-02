@@ -1,4 +1,4 @@
-name: OWASP ZAP API scan
+name: OWASP ZAP scans
 
 on:
   workflow_dispatch:
@@ -22,7 +22,7 @@ env:
 
 jobs:
   scan:
-    name: Authenticated API scan
+    name: API and SSR scans
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -75,7 +75,7 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: Build API and seeder
+      - name: Build application and seeder
         run: cargo build --bins --locked
 
       - name: Run migrations and seed disposable data
@@ -86,17 +86,17 @@ jobs:
           docker run --rm --network host redis:8-alpine \
             redis-cli -h 127.0.0.1 SET api-permissions:9000000000000000001 '[]' EX 7200
 
-      - name: Start API
+      - name: Start application
         run: |
-          target/debug/tg-archive-bot web >api.log 2>&1 &
-          echo "$!" > api.pid
+          target/debug/tg-archive-bot web >app.log 2>&1 &
+          echo "$!" > app.pid
 
-      - name: Wait for API and OpenAPI document
+      - name: Wait for application readiness
         run: |
           for attempt in $(seq 1 60); do
-            if ! kill -0 "$(cat api.pid)" 2>/dev/null; then
-              echo "API process exited during startup"
-              cat api.log
+            if ! kill -0 "$(cat app.pid)" 2>/dev/null; then
+              echo "Application process exited during startup"
+              cat app.log
               exit 1
             fi
             if curl --silent --show-error --fail http://127.0.0.1:3000/api/v1/healthcheck >/dev/null && \
@@ -107,8 +107,8 @@ jobs:
             sleep 2
           done
 
-          echo "API did not become ready"
-          cat api.log
+          echo "Application did not become ready"
+          cat app.log
           exit 1
 
       - name: Verify seeded API token
@@ -121,14 +121,12 @@ jobs:
         env:
           ZAP_AUTH_HEADER_VALUE: Bearer ${{ env.TG_BOT_ZAP_API_TOKEN }}
         run: |
-          mkdir -p zap-reports
-          chmod 777 zap-reports
+          mkdir -p zap-api-reports
+          chmod 777 zap-api-reports
           set +e
-          # Host networking makes 127.0.0.1 inside ZAP refer to this Linux runner,
-          # where the Rust API is listening, rather than to an isolated container.
           docker run --rm --network host \
             --env ZAP_AUTH_HEADER_VALUE \
-            --volume "$GITHUB_WORKSPACE/zap-reports:/zap/wrk:rw" \
+            --volume "$GITHUB_WORKSPACE/zap-api-reports:/zap/wrk:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-api-scan.py \
               -t http://127.0.0.1:3000/openapi.json \
@@ -141,13 +139,39 @@ jobs:
           set -e
 
           if [[ "$status" -eq 0 || "$status" -eq 1 || "$status" -eq 2 ]]; then
-            echo "ZAP completed with report status $status; findings are non-blocking for now."
+            echo "ZAP API scan completed with report status $status; findings are non-blocking."
             exit 0
           fi
-          echo "ZAP failed to run (exit status $status)."
+          echo "ZAP API scan failed to run (exit status $status)."
           exit "$status"
 
-      - name: Convert ZAP report to SARIF
+      - name: Run ZAP SSR full scan
+        run: |
+          mkdir -p zap-ssr-reports
+          chmod 777 zap-ssr-reports
+          set +e
+          # Host networking makes 127.0.0.1 inside ZAP refer to this Linux runner,
+          # where the Rust application is listening, rather than to an isolated container.
+          docker run --rm --network host \
+            --volume "$GITHUB_WORKSPACE/zap-ssr-reports:/zap/wrk:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py \
+              -t http://127.0.0.1:3000/login \
+              -r zap-report.html \
+              -J zap-report.json \
+              -x zap-report.xml \
+              -g rules.tsv
+          status=$?
+          set -e
+
+          if [[ "$status" -eq 0 || "$status" -eq 1 || "$status" -eq 2 ]]; then
+            echo "ZAP SSR scan completed with report status $status; findings are non-blocking."
+            exit 0
+          fi
+          echo "ZAP SSR scan failed to run (exit status $status)."
+          exit "$status"
+
+      - name: Convert ZAP API report to SARIF
         run: |
           jq '
             . as $zap |
@@ -192,35 +216,98 @@ jobs:
                 ) | flatten)
               }]
             }
-          ' zap-reports/zap-report.json > zap-reports/zap-report.sarif
+          ' zap-api-reports/zap-report.json > zap-api-reports/zap-report.sarif
           jq --exit-status '.version == "2.1.0" and (.runs | type == "array")' \
-            zap-reports/zap-report.sarif >/dev/null
+            zap-api-reports/zap-report.sarif >/dev/null
 
-      - name: Upload SARIF to GitHub code scanning
+      - name: Upload ZAP API SARIF to GitHub code scanning
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: zap-reports/zap-report.sarif
+          sarif_file: zap-api-reports/zap-report.sarif
           category: owasp-zap-api
 
-      - name: Upload ZAP reports
+      - name: Convert ZAP SSR report to SARIF
+        run: |
+          jq '
+            . as $zap |
+            [$zap.site[]?.alerts[]?] as $alerts |
+            {
+              version: "2.1.0",
+              "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+              runs: [{
+                tool: {
+                  driver: {
+                    name: "OWASP ZAP",
+                    informationUri: "https://www.zaproxy.org/",
+                    version: ($zap["@version"] // "unknown"),
+                    rules: ($alerts | unique_by(.pluginid) | map({
+                      id: .pluginid,
+                      shortDescription: {text: (.alert // .name)},
+                      fullDescription: {text: ((.desc // "") | gsub("<[^>]+>"; ""))},
+                      help: {text: ((.solution // "") | gsub("<[^>]+>"; ""))},
+                      properties: {
+                        tags: (["security", "external/cwe/cwe-" + (.cweid // "-1")]),
+                        "security-severity": (if .riskcode == "3" then "8.0" elif .riskcode == "2" then "5.0" elif .riskcode == "1" then "3.0" else "0.0" end)
+                      }
+                    }))
+                  }
+                },
+                results: ($alerts | map(
+                  . as $alert |
+                  if ((.instances // []) | length) == 0 then
+                    [{
+                      ruleId: .pluginid,
+                      level: (if .riskcode == "3" then "error" elif .riskcode == "2" then "warning" else "note" end),
+                      message: {text: (.alert // .name)}
+                    }]
+                  else
+                    [.instances[] | {
+                      ruleId: $alert.pluginid,
+                      level: (if $alert.riskcode == "3" then "error" elif $alert.riskcode == "2" then "warning" else "note" end),
+                      message: {text: (($alert.alert // $alert.name) + " (" + (.method // "") + " " + (.uri // "") + ")")},
+                      logicalLocations: [{name: (.uri // "http://127.0.0.1:3000/")}]
+                    }]
+                  end
+                ) | flatten)
+              }]
+            }
+          ' zap-ssr-reports/zap-report.json > zap-ssr-reports/zap-report.sarif
+          jq --exit-status '.version == "2.1.0" and (.runs | type == "array")' \
+            zap-ssr-reports/zap-report.sarif >/dev/null
+
+      - name: Upload ZAP SSR SARIF to GitHub code scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: zap-ssr-reports/zap-report.sarif
+          category: owasp-zap-ssr
+
+      - name: Upload ZAP API reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: zap-api-reports
-          path: zap-reports/
+          path: zap-api-reports/
           if-no-files-found: warn
 
-      - name: Upload API log on failure
+      - name: Upload ZAP SSR reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-ssr-reports
+          path: zap-ssr-reports/
+          if-no-files-found: warn
+
+      - name: Upload application log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: zap-api-server-log
-          path: api.log
+          name: zap-application-log
+          path: app.log
           if-no-files-found: warn
 
-      - name: Stop API
+      - name: Stop application
         if: always()
         run: |
-          if [[ -f api.pid ]]; then
-            kill "$(cat api.pid)" 2>/dev/null || true
+          if [[ -f app.pid ]]; then
+            kill "$(cat app.pid)" 2>/dev/null || true
           fi

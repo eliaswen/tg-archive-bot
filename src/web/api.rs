@@ -15,6 +15,7 @@ use std::{
 };
 use tower_sessions::Session;
 use tower_sessions_redis_store::fred::{error::{Error as RedisError, ErrorKind as RedisErrorKind}, prelude::*, types::{Expiration, SetOptions}};
+use tower_http::normalize_path::NormalizePathLayer;
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
 const RESULTS_PER_PAGE: i64 = 100;
@@ -397,11 +398,12 @@ pub(super) fn router(data: WebData) -> Router {
         .route("/metadata", get(metadata_lookup))
         .route("/token/info", get(token_info))
         .route("/token/revoke", post(revoke_token))
+        .route("/token/revoke", get(invalid_method_use_post))
         .route_layer(middleware::from_fn_with_state(
             data.clone(),
             require_api_user,
         ));
-    Router::new()
+    let app = Router::new()
         .route("/token", post(create_token))
         .route("/healthcheck", get(healthcheck))
         .merge(protected)
@@ -409,7 +411,9 @@ pub(super) fn router(data: WebData) -> Router {
             data.clone(),
             set_security_headers,
         ))
-        .with_state(data)
+        .with_state(data);
+
+    app.layer(NormalizePathLayer::trim_trailing_slash())
 }
 
 async fn require_api_user(
@@ -1191,6 +1195,10 @@ async fn set_security_headers(
         HeaderValue::from_static("same-origin"),
     );
     response
+}
+
+async fn invalid_method_use_post() -> Response {
+    (StatusCode::METHOD_NOT_ALLOWED, [(header::ALLOW, HeaderValue::from_static("POST"))], Json(ErrorResponse { error: "invalid HTTP method, use POST instead" }), ).into_response()
 }
 
 #[utoipa::path(
