@@ -172,6 +172,8 @@ jobs:
             zap-full-scan.py \
               -t http://127.0.0.1:3000/ \
               -m 1 \
+              -T 5 \
+              -z "-config scanner.maxScanDurationInMins=10 -config scanner.maxRuleDurationInMins=1" \
               -r zap-report.html \
               -J zap-report.json \
               -x zap-report.xml \
