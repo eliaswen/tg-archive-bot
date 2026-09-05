@@ -22,6 +22,25 @@ pub(super) async fn theme_request(jar: CookieJar, request: Request, next: Next) 
     ACTIVE_THEME.scope(theme, next.run(request)).await
 }
 
+pub(super) async fn csrf_request(session: Session, request: Request, next: Next) -> Response {
+    let csrf_token = match session.get::<String>("csrf_token").await {
+        Ok(Some(csrf_token)) => csrf_token,
+        Ok(None) => {
+            let csrf_token: String = rand::rng()
+                .sample_iter(&Alphanumeric)
+                .take(48)
+                .map(char::from)
+                .collect();
+            if session.insert("csrf_token", &csrf_token).await.is_err() {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            csrf_token
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    ACTIVE_CSRF_TOKEN.scope(csrf_token, next.run(request)).await
+}
+
 pub(super) async fn require_user(
     State(data): State<WebData>,
     session: Session,
@@ -247,7 +266,10 @@ fn privacy_policy_html() -> String {
 }
 
 pub(super) async fn anonymize_confirmation() -> Html<String> {
-    let body = render_template(&AnonymizeConfirmationTemplate);
+    let csrf_token = csrf_token();
+    let body = render_template(&AnonymizeConfirmationTemplate {
+        csrf_token: &csrf_token,
+    });
     Html(page("Confirm anonymization", &body))
 }
 
@@ -255,7 +277,11 @@ pub(super) async fn anonymize_all(
     State(data): State<WebData>,
     Extension(user): Extension<WebUser>,
     session: Session,
+    Form(form): Form<CsrfForm>,
 ) -> Response {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return csrf_error().into_response();
+    }
     let result = async {
         let mut transaction = data.pool.begin().await?;
         sqlx::query(
@@ -317,6 +343,9 @@ pub(super) async fn set_theme(
     headers: HeaderMap,
     Form(form): Form<ThemeForm>,
 ) -> Response {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return csrf_error().into_response();
+    }
     let theme = Theme::from_cookie(Some(&form.theme));
     let cookie = Cookie::build(("theme", theme.as_str()))
         .path("/")
@@ -360,6 +389,9 @@ pub(super) async fn set_timezone(
     jar: CookieJar,
     Json(form): Json<TimezoneForm>,
 ) -> Response {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return csrf_error().into_response();
+    }
     if form.timezone.parse::<chrono_tz::Tz>().is_err() {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -509,9 +541,12 @@ fn oauth2_error_handling(error_code: &str) -> Response {
     };
 }
 
-pub(super) async fn logout(session: Session) -> Redirect {
+pub(super) async fn logout(session: Session, Form(form): Form<CsrfForm>) -> Response {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return csrf_error().into_response();
+    }
     let _ = session.delete().await;
-    Redirect::to("/login")
+    Redirect::to("/login").into_response()
 }
 
 pub(super) fn oauth_error(message: &str) -> Response {

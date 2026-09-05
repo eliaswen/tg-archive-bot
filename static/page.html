@@ -3,6 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{csrf_token}}">
     <title>{{ title }} - TG Archive</title>
     <link rel="stylesheet" href="/theme.css">
 {% if detect_timezone %}    <script src="/timezone.js" defer></script>
@@ -17,7 +18,7 @@
             <a href="/channels">Channels</a> |
             <a href="/users">Users</a> |
             <a href="/messages">Messages</a> |
-            <form method="post" action="/logout"><button type="submit">Log out</button></form>
+            <form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{csrf_token}}"><button type="submit">Log out</button></form>
         </nav>{% endif %}
     </header>
     <main class="page-content">
@@ -29,6 +30,7 @@
             Copyright © 2026 Ewi and contributors<br>
             This content is licensed under GPL-3.0.</p>
         <form class="footer-theme" method="post" action="/theme">
+            <input type="hidden" name="csrf_token" value="{{csrf_token}}">
             <label>Theme
                 <select name="theme">
                     <option value="white"{% if theme == "white" %} selected{% endif %}>White</option>

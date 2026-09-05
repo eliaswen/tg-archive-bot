@@ -2,6 +2,7 @@
 <p>Are you certain you want to proceed?</p>
 <p>This action cannot be undone.</p>
 <form method="post" action="/privacy/anonymize">
+    <input type="hidden" name="csrf_token" value="{{csrf_token}}">
     <button type="submit">Confirm</button>
 </form>
 <p><a href="/privacy">Cancel</a></p>

@@ -41,6 +41,7 @@ async fn openapi_json() -> impl IntoResponse {
 tokio::task_local! {
     static ACTIVE_THEME: Theme;
     static ACTIVE_TIMEZONE: TimezoneContext;
+    static ACTIVE_CSRF_TOKEN: String;
 }
 
 const ITEMS_PER_PAGE: i64 = 100;
@@ -93,6 +94,7 @@ struct PageTemplate<'a> {
     title: &'a str,
     body: &'a str,
     theme: &'a str,
+    csrf_token: &'a str,
     logged_in: bool,
     detect_timezone: bool,
 }
@@ -117,7 +119,9 @@ struct PrivacyTemplate {
 
 #[derive(Template)]
 #[template(path = "anonymize-confirmation.html")]
-struct AnonymizeConfirmationTemplate;
+struct AnonymizeConfirmationTemplate<'a> {
+    csrf_token: &'a str,
+}
 
 #[derive(Clone, Copy)]
 enum Theme {
@@ -147,11 +151,13 @@ impl Theme {
 #[derive(Deserialize)]
 struct ThemeForm {
     theme: String,
+    csrf_token: String,
 }
 
 #[derive(Deserialize)]
 struct TimezoneForm {
     timezone: String,
+    csrf_token: String,
 }
 
 #[derive(Template)]
@@ -183,6 +189,7 @@ struct SearchFormTemplate<'a> {
     action: &'a str,
     label: &'a str,
     search: &'a str,
+    csrf_token: &'a str,
 }
 
 #[derive(Template)]
@@ -416,6 +423,7 @@ struct PageButtonTemplate<'a> {
     action: &'a str,
     search: &'a str,
     search_by: Option<&'a str>,
+    csrf_token: &'a str,
     page_number: i64,
     label: &'a str,
 }
@@ -432,6 +440,7 @@ struct ArbitraryPageTemplate<'a> {
     action: &'a str,
     search: &'a str,
     search_by: Option<&'a str>,
+    csrf_token: &'a str,
     total_pages: i64,
 }
 
@@ -440,6 +449,7 @@ struct ArbitraryPageTemplate<'a> {
 struct MessageSearchFormTemplate<'a> {
     action: &'a str,
     search: &'a str,
+    csrf_token: &'a str,
     content_selected: &'a str,
     timestamp_selected: &'a str,
 }
@@ -521,6 +531,7 @@ struct SearchForm {
     #[serde(default)]
     search: String,
     page: Option<i64>,
+    csrf_token: String,
 }
 
 #[derive(Default, Deserialize)]
@@ -530,6 +541,12 @@ struct MessageSearchForm {
     #[serde(default)]
     search_by: String,
     page: Option<i64>,
+    csrf_token: String,
+}
+
+#[derive(Deserialize)]
+struct CsrfForm {
+    csrf_token: String,
 }
 
 enum MessageScope {
@@ -673,6 +690,7 @@ pub async fn run(
         .route("/timezone", axum::routing::post(set_timezone))
         .route("/timezone.js", get(timezone_js))
         .merge(archive)
+        .layer(middleware::from_fn(csrf_request))
         .with_state(data)
         .nest("/api/v1", api)
         .layer(middleware::from_fn(theme_request))
@@ -685,7 +703,7 @@ pub async fn run(
         HeaderValue::from_static("same-origin"),))
         .layer(set_header::SetResponseHeaderLayer::overriding(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("default-src 'self' cdn.discordapp.com"),))
+        HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://cdn.discordapp.com; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';"),))
         .layer(set_header::SetResponseHeaderLayer::overriding(
         HeaderName::from_static("x-frame-options"),
         HeaderValue::from_static("deny"),))
@@ -755,6 +773,7 @@ impl Pagination {
                 action,
                 search,
                 search_by,
+                csrf_token: &csrf_token(),
                 total_pages: self.total_pages,
             });
             for page_number in (self.total_pages - 2).max(SHOWN_PAGES + 1)..=self.total_pages {
@@ -812,6 +831,7 @@ fn page_button(
         action,
         search,
         search_by,
+        csrf_token: &csrf_token(),
         page_number,
         label,
     })
@@ -822,6 +842,7 @@ fn search_form(action: &str, search: &str, label: &str) -> String {
         action,
         label,
         search,
+        csrf_token: &csrf_token(),
     })
 }
 
@@ -912,6 +933,7 @@ fn message_search_form(action: &str, search: &str, search_by: &str) -> String {
     render_template(&MessageSearchFormTemplate {
         action,
         search,
+        csrf_token: &csrf_token(),
         content_selected,
         timestamp_selected,
     })
@@ -963,13 +985,32 @@ fn render_page(title: &str, body: &str, logged_in: bool) -> String {
     let detect_timezone = ACTIVE_TIMEZONE
         .try_with(|context| context.detect)
         .unwrap_or(false);
+    let csrf_token = csrf_token();
     render_template(&PageTemplate {
         title,
         body,
         theme,
+        csrf_token: &csrf_token,
         logged_in,
         detect_timezone,
     })
+}
+
+fn csrf_token() -> String {
+    ACTIVE_CSRF_TOKEN.try_with(Clone::clone).unwrap_or_default()
+}
+
+fn csrf_token_is_valid(token: &str) -> bool {
+    ACTIVE_CSRF_TOKEN
+        .try_with(|csrf_token| !csrf_token.is_empty() && csrf_token == token)
+        .unwrap_or(false)
+}
+
+fn csrf_error() -> (StatusCode, Html<String>) {
+    (
+        StatusCode::FORBIDDEN,
+        Html(page("Forbidden", "Invalid or missing CSRF token.")),
+    )
 }
 
 fn localize_timestamp(value: &str) -> String {
@@ -1270,6 +1311,30 @@ mod tests {
             .await;
     }
 
+    #[tokio::test]
+    async fn renders_and_validates_csrf_tokens() {
+        ACTIVE_CSRF_TOKEN
+            .scope("csrf-token".into(), async {
+                let page = render_page("Archive", "Content", true);
+                let search = search_form("/servers", "", "Search servers");
+                let message_search = message_search_form("/messages", "", "content");
+                let pagination = Pagination::new(2, ITEMS_PER_PAGE * 3).render("/servers", "");
+
+                assert_eq!(
+                    page.matches("name=\"csrf_token\" value=\"csrf-token\"")
+                        .count(),
+                    2
+                );
+                assert!(page.contains("name=\"csrf-token\" content=\"csrf-token\""));
+                assert!(search.contains("name=\"csrf_token\" value=\"csrf-token\""));
+                assert!(message_search.contains("name=\"csrf_token\" value=\"csrf-token\""));
+                assert!(pagination.contains("name=\"csrf_token\" value=\"csrf-token\""));
+                assert!(csrf_token_is_valid("csrf-token"));
+                assert!(!csrf_token_is_valid("wrong-token"));
+            })
+            .await;
+    }
+
     #[test]
     fn refreshes_expired_or_legacy_channel_access() {
         let mut user = WebUser {
@@ -1342,10 +1407,11 @@ mod tests {
 
     #[test]
     fn anonymization_requires_a_separate_confirmation_page() {
-        let body = render_template(&AnonymizeConfirmationTemplate);
+        let body = render_template(&AnonymizeConfirmationTemplate { csrf_token: "token" });
 
         assert!(body.contains("method=\"post\""));
         assert!(body.contains("action=\"/privacy/anonymize\""));
+        assert!(body.contains("name=\"csrf_token\" value=\"token\""));
         assert!(body.contains("Confirm anonymization"));
     }
 }

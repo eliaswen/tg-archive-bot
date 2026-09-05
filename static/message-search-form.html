@@ -1,4 +1,5 @@
 <form method="post" action="{{action}}">
+    <input type="hidden" name="csrf_token" value="{{csrf_token}}">
     <label>Search messages: <input type="search" name="search" value="{{search}}"></label>
     <label>Search by:
         <select name="search_by">

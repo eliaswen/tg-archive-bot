@@ -29,6 +29,9 @@ pub(super) async fn search_servers(
     Extension(user): Extension<WebUser>,
     Form(form): Form<SearchForm>,
 ) -> WebResult {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return Err(csrf_error());
+    }
     render_servers(
         &data.pool,
         &form.search,
@@ -164,6 +167,9 @@ pub(super) async fn search_server_messages(
     Path(server_id): Path<i64>,
     Form(form): Form<MessageSearchForm>,
 ) -> WebResult {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return Err(csrf_error());
+    }
     render_server_messages(
         &data.pool,
         server_id,
@@ -228,6 +234,9 @@ pub(super) async fn search_channel_messages(
     Path(channel_id): Path<i64>,
     Form(form): Form<MessageSearchForm>,
 ) -> WebResult {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return Err(csrf_error());
+    }
     render_channel_messages(
         &data.pool,
         channel_id,
@@ -343,6 +352,9 @@ pub(super) async fn search_channels(
     Extension(user): Extension<WebUser>,
     Form(form): Form<SearchForm>,
 ) -> WebResult {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return Err(csrf_error());
+    }
     render_channels(
         &data.pool,
         &form.search,
@@ -505,6 +517,9 @@ pub(super) async fn search_users(
     Extension(user): Extension<WebUser>,
     Form(form): Form<SearchForm>,
 ) -> WebResult {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return Err(csrf_error());
+    }
     render_users(
         &data.pool,
         &form.search,
@@ -646,6 +661,9 @@ pub(super) async fn search_user_messages(
     Path(user_id): Path<i64>,
     Form(form): Form<MessageSearchForm>,
 ) -> WebResult {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return Err(csrf_error());
+    }
     render_user_messages(
         &data.pool,
         user_id,
@@ -763,6 +781,9 @@ pub(super) async fn search_messages(
     Extension(user): Extension<WebUser>,
     Form(form): Form<MessageSearchForm>,
 ) -> WebResult {
+    if !csrf_token_is_valid(&form.csrf_token) {
+        return Err(csrf_error());
+    }
     render_messages(
         &data.pool,
         &form.search,
