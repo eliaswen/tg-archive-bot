@@ -5,8 +5,9 @@ mod handlers;
 use askama::Template;
 use axum::{
     Extension, Form, Json, Router,
+    body::{Body, to_bytes},
     extract::{Path, Query, Request, State},
-    http::{HeaderMap, StatusCode, header, HeaderName, HeaderValue},
+    http::{HeaderMap, Method, StatusCode, header, HeaderName, HeaderValue},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
@@ -15,6 +16,7 @@ use tower_http::set_header;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use rand::{distr::Alphanumeric};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -47,6 +49,8 @@ tokio::task_local! {
 const ITEMS_PER_PAGE: i64 = 100;
 const SHOWN_PAGES: i64 = 10;
 const CHANNEL_ACCESS_TTL_SECONDS: u64 = 5 * 60;
+const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
+const PRIVATE_NO_CACHE: HeaderValue = HeaderValue::from_static("private, no-cache");
 
 #[derive(Clone)]
 struct WebData {
@@ -695,6 +699,7 @@ pub async fn run(
         .nest("/api/v1", api)
         .layer(middleware::from_fn(theme_request))
         .layer(middleware::from_fn(timezone_request))
+        .layer(middleware::from_fn(cache_response))
         .layer(set_header::SetResponseHeaderLayer::overriding(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),))
@@ -707,6 +712,14 @@ pub async fn run(
         .layer(set_header::SetResponseHeaderLayer::overriding(
         HeaderName::from_static("x-frame-options"),
         HeaderValue::from_static("deny"),))
+        .layer(set_header::SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static(
+        "camera=(), microphone=(), geolocation=(), \
+         payment=(), usb=(), serial=(), bluetooth=(), \
+         accelerometer=(), gyroscope=(), magnetometer=()"
+        ),)
+        )
         .layer(sessions);
 
     info!("Web server listening on {}", listener.local_addr().unwrap());
@@ -723,6 +736,94 @@ pub async fn run(
         error!("Web server error: {}", error);
     }
     redis_connection.abort();
+}
+
+async fn cache_response(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let if_none_match = request.headers().get(header::IF_NONE_MATCH).cloned();
+    let response = next.run(request).await;
+    apply_cache_headers(&method, &path, if_none_match.as_ref(), response).await
+}
+
+async fn apply_cache_headers(
+    method: &Method,
+    path: &str,
+    if_none_match: Option<&HeaderValue>,
+    mut response: Response,
+) -> Response {
+    if sensitive_request(method, path) {
+        response.headers_mut().insert(header::CACHE_CONTROL, NO_STORE);
+        return response;
+    }
+
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, PRIVATE_NO_CACHE);
+    if method != Method::GET || response.status() != StatusCode::OK {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let body = match to_bytes(body, usize::MAX).await {
+        Ok(body) => body,
+        Err(error) => {
+            error!("Could not buffer response for ETag generation: {}", error);
+            let mut response = StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, PRIVATE_NO_CACHE);
+            return response;
+        }
+    };
+    let etag = entity_tag(&body);
+    parts.headers.insert(header::ETAG, etag.clone());
+    if if_none_match.is_some_and(|value| etag_matches(value, &etag)) {
+        parts.status = StatusCode::NOT_MODIFIED;
+        parts.headers.remove(header::CONTENT_LENGTH);
+        parts.headers.remove(header::TRANSFER_ENCODING);
+        Response::from_parts(parts, Body::empty())
+    } else {
+        Response::from_parts(parts, Body::from(body))
+    }
+}
+
+fn entity_tag(body: &[u8]) -> HeaderValue {
+    let hash = Sha256::digest(body);
+    let mut value = String::with_capacity(hash.len() * 2 + 2);
+    value.push('"');
+    for byte in hash {
+        value.push_str(&format!("{byte:02x}"));
+    }
+    value.push('"');
+    HeaderValue::from_str(&value).unwrap()
+}
+
+fn sensitive_request(method: &Method, path: &str) -> bool {
+    if method != Method::GET && method != Method::HEAD {
+        return true;
+    }
+
+    path == "/"
+        || path == "/privacy/anonymize"
+        || path == "/login/discord"
+        || path.starts_with("/login/discord/")
+        || path == "/logout"
+        || path == "/api/v1"
+        || path.starts_with("/api/v1/") && path != "/api/v1/healthcheck"
+        || ["/servers", "/channels", "/users", "/messages", "/attachments"]
+            .iter()
+            .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+}
+
+fn etag_matches(value: &HeaderValue, etag: &HeaderValue) -> bool {
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let etag = etag.to_str().unwrap();
+    value.split(',').map(str::trim).any(|candidate| {
+        candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
+    })
 }
 
 struct Pagination {
@@ -1413,5 +1514,85 @@ mod tests {
         assert!(body.contains("action=\"/privacy/anonymize\""));
         assert!(body.contains("name=\"csrf_token\" value=\"token\""));
         assert!(body.contains("Confirm anonymization"));
+    }
+
+    #[test]
+    fn disables_storage_for_sensitive_and_state_changing_requests() {
+        assert!(sensitive_request(&Method::GET, "/"));
+        assert!(sensitive_request(&Method::GET, "/messages/1"));
+        assert!(sensitive_request(&Method::GET, "/attachments/1"));
+        assert!(sensitive_request(&Method::GET, "/login/discord/callback"));
+        assert!(sensitive_request(&Method::GET, "/api/v1/me"));
+        assert!(sensitive_request(&Method::POST, "/theme"));
+        assert!(!sensitive_request(&Method::GET, "/privacy-policy"));
+        assert!(!sensitive_request(&Method::GET, "/theme.css"));
+        assert!(!sensitive_request(&Method::GET, "/api/v1/healthcheck"));
+    }
+
+    #[test]
+    fn accepts_strong_weak_list_and_wildcard_etag_matches() {
+        let etag = HeaderValue::from_static("\"current\"");
+        assert!(etag_matches(&HeaderValue::from_static("\"current\""), &etag));
+        assert!(etag_matches(&HeaderValue::from_static("W/\"current\""), &etag));
+        assert!(etag_matches(
+            &HeaderValue::from_static("\"old\", W/\"current\""),
+            &etag
+        ));
+        assert!(etag_matches(&HeaderValue::from_static("*"), &etag));
+        assert!(!etag_matches(&HeaderValue::from_static("\"old\""), &etag));
+    }
+
+    #[tokio::test]
+    async fn adds_etags_and_returns_not_modified_for_matching_public_responses() {
+        let response = apply_cache_headers(
+            &Method::GET,
+            "/theme.css",
+            None,
+            Html("response body").into_response(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&PRIVATE_NO_CACHE)
+        );
+        let etag = response.headers().get(header::ETAG).unwrap().clone();
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            "response body"
+        );
+
+        let response = apply_cache_headers(
+            &Method::GET,
+            "/theme.css",
+            Some(&etag),
+            Html("response body").into_response(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers().get(header::ETAG), Some(&etag));
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&PRIVATE_NO_CACHE)
+        );
+        assert!(
+            to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn does_not_generate_etags_for_sensitive_responses() {
+        let response = apply_cache_headers(
+            &Method::GET,
+            "/messages/1",
+            None,
+            Html("sensitive body").into_response(),
+        )
+        .await;
+        assert_eq!(response.headers().get(header::CACHE_CONTROL), Some(&NO_STORE));
+        assert!(response.headers().get(header::ETAG).is_none());
     }
 }
