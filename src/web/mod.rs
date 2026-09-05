@@ -683,6 +683,12 @@ pub async fn run(
         .layer(set_header::SetResponseHeaderLayer::overriding(
         HeaderName::from_static("cross-origin-resource-policy"),
         HeaderValue::from_static("same-origin"),))
+        .layer(set_header::SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("default-src 'self' cdn.discordapp.com"),))
+        .layer(set_header::SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("deny"),))
         .layer(sessions);
 
     info!("Web server listening on {}", listener.local_addr().unwrap());
