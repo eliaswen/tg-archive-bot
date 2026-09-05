@@ -912,6 +912,9 @@ pub(super) async fn message(
     Path(message_id): Path<i64>,
     Query(query): Query<MessageQuery>,
 ) -> WebResult {
+    if message_id.len() = 0 {
+        return Err(bad_request("Please provide a message id."));
+    }
     let message = sqlx::query_as::<_, (String, i64, i64, String, i64, String, String, bool)>(
         "SELECT
              m.author_username,
