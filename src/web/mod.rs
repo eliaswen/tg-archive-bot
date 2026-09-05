@@ -707,6 +707,12 @@ pub async fn run(
         HeaderName::from_static("cross-origin-resource-policy"),
         HeaderValue::from_static("same-origin"),))
         .layer(set_header::SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("cross-origin-embedder-policy"),
+        HeaderValue::from_static("require-corp"),))
+        .layer(set_header::SetResponseHeaderLayer::overriding(
+        HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),))
+        .layer(set_header::SetResponseHeaderLayer::overriding(
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://cdn.discordapp.com; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';"),))
         .layer(set_header::SetResponseHeaderLayer::overriding(
