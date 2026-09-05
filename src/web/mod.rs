@@ -1042,6 +1042,16 @@ fn not_found(message: &str) -> (StatusCode, Html<String>) {
     )
 }
 
+fn bad_request(message: &str) -> (StatusCode, Html<String>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Html(page(
+            "Bad Request",
+            &render_template(&ErrorTemplate { message }),
+        )),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
