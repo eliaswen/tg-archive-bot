@@ -5,6 +5,7 @@ use tracing::{debug, error, info, trace};
 use tracing_subscriber::EnvFilter;
 mod archive_stats;
 mod bot;
+mod ml;
 mod web;
 
 pub struct Data {
@@ -37,8 +38,8 @@ async fn main() {
     trace!("Env loaded");
 
     let process = env::args().nth(1).unwrap_or_else(|| "bot".to_string());
-    if process != "bot" && process != "web" {
-        error!("Expected process to be `bot` or `web`");
+    if process != "bot" && process != "web" && process != "ml" {
+        error!("Expected process to be `bot` or `web` or `ml`, got `{}`", process);
         std::process::exit(2);
     }
 
@@ -62,6 +63,14 @@ async fn main() {
 
     if process == "web" {
         run_web(pool).await;
+        return;
+    }
+
+    if process == "ml" {
+        if let Err(error) = ml::run_worker(pool).await {
+            error!("ML worker stopped: {error}");
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -107,10 +116,8 @@ async fn run_bot(pool: sqlx::PgPool) {
     trace!("Initalizing framework");
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            event_handler: |ctx, event, framework, user_data| {
-                Box::pin(bot::event_handler::event_handler(
-                    ctx, event, framework, user_data,
-                ))
+            event_handler: |framework, event| {
+                Box::pin(bot::event_handler::event_handler(framework, event))
             },
             on_error: |error| {
                 Box::pin(async move {

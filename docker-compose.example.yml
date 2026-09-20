@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: tg-archive-bot-postgres
     restart: always
     environment:
@@ -31,6 +31,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: cpu-runtime
     image: tg-archive-bot:latest
     # OR pull from registry
     # image: git.ewenlau.net/ewenlau/tg-archive-bot:latest
@@ -46,6 +47,10 @@ services:
       TG_BOT_DATABASE_URL: postgres://postgres:YOUR_POSTGRES_PASSWORD_HERE@postgres:5432/tg_archive_bot
       TG_BOT_LOG: info
   web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: cpu-runtime
     image: tg-archive-bot:latest
     # OR pull the same image used by the bot from the registry
     # image: git.ewenlau.net/ewenlau/tg-archive-bot:latest
@@ -68,13 +73,43 @@ services:
       TG_BOT_REDIS_URL: redis://redis:6379
       TG_BOT_LOG: info
       TG_BOT_WEB_ADDRESS: 0.0.0.0:3000
+      TG_BOT_ML_CACHE: /var/cache/tg-archive-bot/models
+    volumes:
+      - model_cache:/var/cache/tg-archive-bot/models
     healthcheck:
       test: [ "CMD", "curl", "--fail", "http://localhost:3000/api/v1/healthcheck" ]
       interval: 10s
       timeout: 5s
       retries: 5
+  ml:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: cuda-runtime
+    image: tg-archive-bot-ml:latest
+    restart: always
+    command: [ "ml" ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TG_BOT_DATABASE_URL: postgres://postgres:YOUR_POSTGRES_PASSWORD_HERE@postgres:5432/tg_archive_bot
+      TG_BOT_LOG: info
+      TG_BOT_ML_CACHE: /var/cache/tg-archive-bot/models
+      TG_BOT_ML_BATCH_SIZE: 8
+    volumes:
+      - model_cache:/var/cache/tg-archive-bot/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  model_cache:
     driver: local

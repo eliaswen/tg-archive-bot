@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower::util::MapResponse;
 use tower_http::normalize_path::NormalizePath;
@@ -64,6 +65,8 @@ struct WebData {
     token_rate_limiter: api::TokenRateLimiter,
     api_permission_cache: api::ApiPermissionCache,
     auth_bypass: Option<(String, i64)>,
+    text_encoder: Option<Arc<crate::ml::TextEncoder>>,
+    ml_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -343,6 +346,8 @@ struct MessageListTemplate<'a> {
 #[template(path = "message-list-item.html")]
 struct MessageListItemTemplate<'a> {
     message_id: i64,
+    message_version: Option<i64>,
+    attachment_filename: Option<&'a str>,
     author_id: i64,
     author: &'a str,
     server_id: i64,
@@ -456,6 +461,7 @@ struct MessageSearchFormTemplate<'a> {
     csrf_token: &'a str,
     content_selected: &'a str,
     timestamp_selected: &'a str,
+    image_selected: &'a str,
 }
 
 #[derive(Template)]
@@ -612,6 +618,13 @@ pub async fn run(
     redirect_uri: String,
     redis_url: String,
 ) {
+    let text_encoder = match crate::ml::load_text_encoder().await {
+        Ok(encoder) => Some(Arc::new(encoder)),
+        Err(error) => {
+            error!("Image semantic search unavailable: {error}");
+            None
+        }
+    };
     let redis = Pool::new(
         Config::from_url(&redis_url).expect("Invalid TG_BOT_REDIS_URL configuration"),
         None,
@@ -647,6 +660,8 @@ pub async fn run(
         token_rate_limiter,
         api_permission_cache: api::ApiPermissionCache::new(redis.clone()),
         auth_bypass,
+        text_encoder,
+        ml_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
     };
     let archive = Router::new()
         .route("/", get(index))
@@ -1032,17 +1047,16 @@ fn render_status_users(users: Vec<(i64, String, i64)>) -> String {
 }
 
 fn message_search_form(action: &str, search: &str, search_by: &str) -> String {
-    let (content_selected, timestamp_selected) = if search_by == "timestamp" {
-        ("", " selected")
-    } else {
-        (" selected", "")
-    };
+    let content_selected = if search_by == "content" { " selected" } else { "" };
+    let timestamp_selected = if search_by == "timestamp" { " selected" } else { "" };
+    let image_selected = if search_by == "image" { " selected" } else { "" };
     render_template(&MessageSearchFormTemplate {
         action,
         search,
         csrf_token: &csrf_token(),
         content_selected,
         timestamp_selected,
+        image_selected,
     })
 }
 
@@ -1264,6 +1278,14 @@ mod tests {
         assert!(html.contains("action=\"/users/123\""));
         assert!(html.contains("value=\"&#60;date&#62;\""));
         assert!(html.contains("value=\"timestamp\" selected"));
+        assert!(!html.contains("value=\"content\" selected"));
+    }
+
+    #[test]
+    fn message_search_form_selects_image_search() {
+        let html = message_search_form("/messages", "cats on a chair", "image");
+
+        assert!(html.contains("value=\"image\" selected"));
         assert!(!html.contains("value=\"content\" selected"));
     }
 

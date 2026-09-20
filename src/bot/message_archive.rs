@@ -446,6 +446,22 @@ async fn record_message_version(
         .bind(data)
         .execute(&mut *transaction)
         .await?;
+
+        if attachment.content_type.as_deref().is_some_and(|content_type| matches!(content_type, "image/jpeg" | "image/jpg" | "image/png" | "image/gif" | "image/webp" | "image/bmp" | "image/x-ms-bmp"))
+            || ((attachment.width.is_some() && attachment.height.is_some()) && matches!(std::path::Path::new(&attachment.filename).extension().and_then(|extension| extension.to_str()).map(str::to_ascii_lowercase).as_deref(), Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp")))
+        {
+            sqlx::query(
+                "INSERT INTO image_embedding_jobs (message_id, message_version, attachment_id, desired_model_revision)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (message_id, message_version, attachment_id) DO NOTHING",
+            )
+            .bind(message_id)
+            .bind(message_version)
+            .bind(attachment.id.get() as i64)
+            .bind(crate::ml::model_identifier())
+            .execute(&mut *transaction)
+            .await?;
+        }
     }
 
     for (embed_index, embed) in message.embeds.iter().enumerate() {

@@ -3,11 +3,11 @@ use poise::serenity_prelude as sere;
 use tracing::{debug, trace};
 
 pub async fn event_handler(
-    ctx: &sere::Context,
+    framework: poise::FrameworkContext<'_, Data, Error>,
     event: &sere::FullEvent,
-    _framework: poise::FrameworkContext<'_, Data, Error>,
-    user_data: &Data,
 ) -> Result<(), Error> {
+    let ctx = framework.serenity_context;
+    let user_data = framework.user_data;
     super::message_archive::ensure_worker_started(ctx, user_data);
     match event {
         sere::FullEvent::Message { new_message } => {

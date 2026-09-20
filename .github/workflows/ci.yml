@@ -20,7 +20,7 @@ jobs:
       contents: read
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -121,13 +121,33 @@ jobs:
             type=raw,value=${{ needs.release_metadata.outputs.version }},enable=${{ needs.release_metadata.outputs.is_release == 'true' }}
             type=raw,value=latest,enable=${{ needs.release_metadata.outputs.is_release == 'true' }}
 
+      - name: Extract ML Docker metadata
+        id: meta_ml
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}-ml
+          tags: |
+            type=raw,value=dev
+            type=raw,value=${{ needs.release_metadata.outputs.version }},enable=${{ needs.release_metadata.outputs.is_release == 'true' }}
+            type=raw,value=latest,enable=${{ needs.release_metadata.outputs.is_release == 'true' }}
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
+          target: cpu-runtime
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Build and push ML
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: cuda-runtime
+          push: true
+          tags: ${{ steps.meta_ml.outputs.tags }}
+          labels: ${{ steps.meta_ml.outputs.labels }}
 
   release:
     name: Create release
