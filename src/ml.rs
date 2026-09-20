@@ -484,6 +484,7 @@ pub async fn run_worker(pool: sqlx::PgPool) -> Result<(), Error> {
             continue;
         }
         for (message_id, version, attachment_id, data) in jobs {
+            let processing_started = std::time::Instant::now();
             let encoder = encoder.clone();
             let embedding = tokio::task::spawn_blocking(move || encoder.embed(&data)).await;
             let result = match embedding {
@@ -499,6 +500,10 @@ pub async fn run_worker(pool: sqlx::PgPool) -> Result<(), Error> {
                         attachment_id,
                         embedding,
                         &model_revision,
+                        processing_started
+                            .elapsed()
+                            .as_millis()
+                            .min(i64::MAX as u128) as i64,
                     )
                     .await
                 }
@@ -530,6 +535,7 @@ async fn persist_embedding(
     attachment_id: i64,
     embedding: Vec<f32>,
     model_revision: &str,
+    processing_duration_ms: i64,
 ) -> Result<(), Error> {
     let vector = pgvector::Vector::from(embedding);
     let mut transaction = pool.begin().await?;
@@ -539,8 +545,8 @@ async fn persist_embedding(
         transaction.rollback().await?;
         return Ok(());
     }
-    sqlx::query("INSERT INTO image_embeddings (message_id, message_version, attachment_id, embedding, model_revision) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (message_id, message_version, attachment_id) DO UPDATE SET embedding = EXCLUDED.embedding, model_revision = EXCLUDED.model_revision, processed_at = NOW()")
-        .bind(message_id).bind(version).bind(attachment_id).bind(vector).bind(model_revision).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO image_embeddings (message_id, message_version, attachment_id, embedding, model_revision, processing_duration_ms) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (message_id, message_version, attachment_id) DO UPDATE SET embedding = EXCLUDED.embedding, model_revision = EXCLUDED.model_revision, processing_duration_ms = EXCLUDED.processing_duration_ms, processed_at = NOW()")
+        .bind(message_id).bind(version).bind(attachment_id).bind(vector).bind(model_revision).bind(processing_duration_ms).execute(&mut *transaction).await?;
     sqlx::query("DELETE FROM image_embedding_jobs WHERE message_id = $1 AND message_version = $2 AND attachment_id = $3")
         .bind(message_id).bind(version).bind(attachment_id).execute(&mut *transaction).await?;
     transaction.commit().await?;

@@ -177,6 +177,11 @@ struct IndexTemplate {
     total_storage: String,
     message_storage: String,
     attachment_storage: String,
+    processed_images: i64,
+    unprocessed_images: i64,
+    average_image_processing_speed: String,
+    average_daily_storage: String,
+    running_time: String,
 }
 
 #[derive(Template)]

@@ -1,10 +1,19 @@
 <h2>Archive</h2>
+<h3>Stats!</h3>
 <p>Archived {{message_count}} messages from {{user_count}} users across {{channel_count}} channels on {{server_count}} servers.</p>
+<p>The archive has been running for {{running_time}}.</p>
+<h3>Machine learning ("smart" image search)</h3>
+<dl>
+    <dt>Processed images</dt><dd>{{processed_images}}</dd>
+    <dt>Unprocessed images</dt><dd>{{unprocessed_images}}</dd>
+    <dt>Average processing speed</dt><dd>{{average_image_processing_speed}}</dd>
+</dl>
 <h3>Storage usage</h3>
 <dl>
     <dt>Archived data</dt><dd>{{total_storage}}</dd>
     <dt>Message content</dt><dd>{{message_storage}}</dd>
     <dt>Attachments</dt><dd>{{attachment_storage}}</dd>
+    <dt>Average data archived per day</dt><dd>{{average_daily_storage}}</dd>
 </dl>
 
 <p>If you cannot see any messages, try and send a message on a server the bot is in.</p>
