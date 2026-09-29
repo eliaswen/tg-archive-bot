@@ -12,21 +12,15 @@ pub async fn run_jobs(pool: sqlx::PgPool) {
 
 async fn check_user_pfps(pool: &sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     debug!("Checking user avatars in the database...");
-    let avatars = sqlx::query!(
-        r#"
-        SELECT uuid, discord_id, image_available, image_checked, discord_avatar_url
-        FROM discord_user_history
-        WHERE image_checked = false
-        "#
+    let avatars = sqlx::query_as::<_, (sqlx::types::Uuid, i64, bool, Option<String>)>(
+        "SELECT uuid, discord_id, image_checked, discord_avatar_url
+         FROM discord_user_history
+         WHERE image_checked = false"
     )
     .fetch_all(pool)
     .await?;
 
-    for avatar in avatars {
-        let discord_id = avatar.discord_id;
-        let uuid = avatar.uuid;
-        let image_checked = avatar.image_checked;
-        let discord_avatar_url = avatar.discord_avatar_url;
+    for (uuid, discord_id, image_checked, discord_avatar_url) in avatars {
         trace!("Checking avatar for user {}", discord_id);
 
         if !image_checked {
@@ -46,14 +40,12 @@ async fn check_user_pfps(pool: &sqlx::PgPool) -> Result<(), Box<dyn std::error::
                     || response.status() == reqwest::StatusCode::GONE
             }) {
                 trace!("Avatar not available for user {}", discord_id);
-                sqlx::query!(
-                    r#"
-                    UPDATE discord_user_history
-                    SET image_available = false, image_checked = true
-                    WHERE uuid = $1
-                    "#,
-                    uuid
+                sqlx::query(
+                    "UPDATE discord_user_history
+                     SET image_available = false, image_checked = true
+                     WHERE uuid = $1"
                 )
+                .bind(uuid)
                 .execute(pool)
                 .await?;
                 continue;
@@ -79,16 +71,14 @@ async fn check_user_pfps(pool: &sqlx::PgPool) -> Result<(), Box<dyn std::error::
                     }
                 };
 
-                sqlx::query!(
-                    r#"
-                    UPDATE discord_user_history
-                    SET image_data = $1, image_available = true, image_checked = true, image_mimetype = $2
-                    WHERE uuid = $3
-                    "#,
-                    image_data,
-                    image_mimetype,
-                    uuid
+                sqlx::query(
+                    "UPDATE discord_user_history
+                     SET image_data = $1, image_available = true, image_checked = true, image_mimetype = $2
+                     WHERE uuid = $3"
                 )
+                .bind(image_data)
+                .bind(image_mimetype)
+                .bind(uuid)
                 .execute(pool)
                 .await?;
 
