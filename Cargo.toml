@@ -39,5 +39,5 @@ tower-sessions-redis-store = "=0.16.0"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 urlencoding = "=2.1.3"
-utoipa = "=5.5.0"
+utoipa = "=6.0.0"
 tower-http = { version = "=0.7.1", features = ["full"] }
