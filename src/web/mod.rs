@@ -309,6 +309,9 @@ struct StatusIconTemplate<'a> {
 #[template(path = "status-avatar.html")]
 struct StatusAvatarTemplate<'a> {
     avatar_url: &'a str,
+    image_url: &'a str,
+    image_checked: bool,
+    image_available: bool,
     first_seen: &'a str,
     last_seen: &'a str,
 }
@@ -691,6 +694,7 @@ pub async fn run(
         .route("/messages", get(messages).post(search_messages))
         .route("/messages/{message_id}", get(message))
         .route("/attachments/{attachment_id}", get(attachment))
+        .route("/avatars/{avatar_id}", get(avatar))
         .route(
             "/privacy/anonymize",
             get(anonymize_confirmation).post(anonymize_all),
@@ -1001,13 +1005,17 @@ fn render_status_icons(icons: Vec<(String, String, String)>) -> String {
     rendered_icons
 }
 
-fn render_status_avatars(avatars: Vec<(String, String, String)>) -> String {
+fn render_status_avatars(avatars: Vec<(String, String, bool, Option<bool>, String, String)>) -> String {
     let mut rendered_avatars = String::new();
-    for (avatar_url, first_seen, last_seen) in avatars {
+    for (avatar_id, avatar_url, image_checked, image_available, first_seen, last_seen) in avatars {
         let first_seen = localize_timestamp(&first_seen);
         let last_seen = localize_timestamp(&last_seen);
+        let image_url = format!("/avatars/{}", avatar_id);
         rendered_avatars.push_str(&render_template(&StatusAvatarTemplate {
             avatar_url: &avatar_url,
+            image_url: &image_url,
+            image_checked,
+            image_available: image_available.unwrap_or(false),
             first_seen: &first_seen,
             last_seen: &last_seen,
         }));

@@ -106,6 +106,7 @@ async fn run_web(pool: sqlx::PgPool) {
 async fn run_bot(pool: sqlx::PgPool) {
     let token = env::var("TG_BOT_DISCORD_TOKEN").expect("Expected a token in the environment");
     info!("Starting bot...");
+    let jobs_pool = pool.clone();
 
     trace!("Loading intents");
     let intents = sere::GatewayIntents::non_privileged()
@@ -162,6 +163,11 @@ async fn run_bot(pool: sqlx::PgPool) {
         })
         .build();
     trace!("Framework initialized");
+
+    debug!("Starting background jobs");
+    tokio::spawn(async move {
+        bot::jobs::run_jobs(jobs_pool).await;
+    });
 
     debug!("Connecting to Discord");
     let mut client = sere::ClientBuilder::new(&token, intents)

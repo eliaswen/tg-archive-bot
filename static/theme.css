@@ -207,3 +207,7 @@ pre {
         max-width: 100%;
     }
 }
+
+.unavailable {
+    color: #b91c1c;
+}

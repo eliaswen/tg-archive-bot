@@ -616,12 +616,18 @@ pub(super) async fn user(
     .fetch_all(&data.pool)
     .await
     .map_err(database_error)?;
-    let avatars = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT discord_avatar_url, MIN(first_seen_at)::text, MAX(last_seen_at)::text
-         FROM discord_user_history
-         WHERE discord_id = $1 AND discord_avatar_url IS NOT NULL
-         GROUP BY discord_avatar_url
-         ORDER BY MIN(first_seen_at), discord_avatar_url;",
+    let avatars = sqlx::query_as::<_, (String, String, bool, Option<bool>, String, String)>(
+        "SELECT uuid, discord_avatar_url, image_checked, image_available, first_seen::text, last_seen::text
+         FROM (
+             SELECT DISTINCT ON (discord_avatar_url)
+                 uuid::text, discord_avatar_url, image_checked, image_available,
+                 MIN(first_seen_at) OVER (PARTITION BY discord_avatar_url) AS first_seen,
+                 MAX(last_seen_at) OVER (PARTITION BY discord_avatar_url) AS last_seen
+             FROM discord_user_history
+             WHERE discord_id = $1 AND discord_avatar_url IS NOT NULL
+             ORDER BY discord_avatar_url, image_checked DESC, image_available DESC, last_seen_at DESC
+         ) avatars
+         ORDER BY first_seen, discord_avatar_url;",
     )
     .bind(user_id)
     .fetch_all(&data.pool)
@@ -676,6 +682,42 @@ pub(super) async fn user(
         access_reason,
     });
     Ok(Html(page(&username, &body)))
+}
+
+pub(super) async fn avatar(
+    State(data): State<WebData>,
+    Path(avatar_id): Path<String>,
+) -> Response {
+    let Ok(avatar_id) = sqlx::types::Uuid::parse_str(&avatar_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let avatar = sqlx::query_as::<_, (Vec<u8>, Option<String>)>(
+        "SELECT image_data, image_mimetype
+         FROM discord_user_history
+         WHERE uuid = $1 AND image_checked = true AND image_available = true;",
+    )
+    .bind(avatar_id)
+    .fetch_optional(&data.pool)
+    .await;
+
+    match avatar {
+        Ok(Some((image_data, image_mimetype))) => {
+            let content_type = image_mimetype.unwrap_or_else(|| "application/octet-stream".into());
+            (
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
+                ],
+                image_data,
+            )
+                .into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => {
+            error!("Database error while loading avatar: {}", error);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 pub(super) async fn user_messages(

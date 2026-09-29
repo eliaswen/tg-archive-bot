@@ -306,8 +306,9 @@ async fn record_message_version(
     .await?;
 
     sqlx::query(
-        "INSERT INTO discord_user_history (discord_id, discord_username, discord_avatar_url)
-         VALUES ($1, $2, $3)
+        "INSERT INTO discord_user_history
+             (discord_id, discord_username, discord_avatar_url, image_available, image_checked)
+         VALUES ($1, $2, $3, NULL, false)
          ON CONFLICT (discord_id, discord_username, discord_avatar_url) DO UPDATE SET
              last_seen_at = NOW();",
     )
