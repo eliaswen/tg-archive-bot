@@ -32,8 +32,9 @@ mod search_content;
 mod search;
 mod metadata_lookup;
 mod healthcheck;
+mod search_image;
 
-use create_token::create_token;
+pub(super) use create_token::create_token;
 use token_info::token_info;
 use revoke_token::revoke_token;
 use me::me;
@@ -49,6 +50,7 @@ use search::search;
 use metadata_lookup::metadata_lookup;
 use healthcheck::healthcheck;
 use revoke_token::invalid_method_use_post;
+use search_image::search_image;
 
 const RESULTS_PER_PAGE: i64 = 100;
 const TOKEN_RATE_LIMIT: Duration = Duration::from_secs(5 * 60);
@@ -187,9 +189,9 @@ struct TokenResponse {
 }
 #[derive(Default, Deserialize, IntoParams, ToSchema)]
 #[into_params(parameter_in = Query)]
-struct CreateTokenQuery {
-    valid_from: Option<i64>,
-    valid_to: Option<i64>,
+pub(super) struct CreateTokenQuery {
+    pub(super) valid_from: Option<i64>,
+    pub(super) valid_to: Option<i64>,
 }
 #[derive(Serialize, sqlx::FromRow, ToSchema)]
 struct TokenInfoResponse {
@@ -329,6 +331,11 @@ struct SearchQuery {
     #[param(style = Form, explode = false)]
     server_scope: Option<Vec<i64>>,
 }
+enum SearchType {
+    Timestamp,
+    Content,
+    Image,
+}
 
 fn deserialize_search_scope<'de, D>(deserializer: D) -> Result<Option<Vec<i64>>, D::Error>
 where
@@ -405,7 +412,7 @@ struct MetadataQuery {
     paths(
         create_token::create_token, token_info::token_info, revoke_token::revoke_token, me::me, view_server::view_server, view_attachment::view_attachment,
         download_attachment::download_attachment, view_channel::view_channel, view_user::view_user, view_message::view_message, search_timestamp::search_timestamp,
-        search_content::search_content, metadata_lookup::metadata_lookup, healthcheck::healthcheck
+        search_content::search_content, search_image::search_image, metadata_lookup::metadata_lookup, healthcheck::healthcheck
     ),
     components(schemas(
         ErrorResponse, MeResponse, TokenResponse, TokenInfoResponse, ServerResponse,
@@ -446,6 +453,7 @@ pub(super) fn router(data: WebData) -> Router {
         .route("/download/attachement/{id}", get(download_attachment))
         .route("/search/timestamp", get(search_timestamp))
         .route("/search/content", get(search_content))
+        .route("/search/image", get(search_image))
         .route("/metadata", get(metadata_lookup))
         .route("/token/info", get(token_info))
         .route("/token/revoke", post(revoke_token))
@@ -582,6 +590,15 @@ async fn set_security_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn documents_image_search_with_bearer_authentication() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let operation = &document["paths"]["/api/v1/search/image"]["get"];
+        assert_eq!(operation["security"][0]["bearer_auth"], serde_json::json!([]));
+        assert!(operation["responses"].get("503").is_some());
+        assert!(operation["parameters"].as_array().unwrap().iter().any(|parameter| parameter["name"] == "q"));
+    }
 
     #[test]
     fn parses_search_scopes() {
@@ -757,18 +774,18 @@ mod tests {
 
     #[test]
     fn search_filter_selects_requested_fields() {
-        let selected = parse_search_filter(Some("discord_id, content"));
+        let selected = search::parse_search_filter(Some("discord_id, content"));
         assert_eq!(
             selected.ok(),
             Some([true, false, false, false, false, false, false, false, true])
         );
-        assert_eq!(parse_search_filter(None).ok(), Some([true; 9]));
+        assert_eq!(search::parse_search_filter(None).ok(), Some([true; 9]));
     }
 
     #[test]
     fn search_filter_rejects_unknown_and_empty_fields() {
-        assert!(parse_search_filter(Some("unknown")).is_err());
-        assert!(parse_search_filter(Some("")).is_err());
+        assert!(search::parse_search_filter(Some("unknown")).is_err());
+        assert!(search::parse_search_filter(Some("")).is_err());
     }
 
     #[test]

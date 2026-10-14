@@ -1,5 +1,6 @@
 use super::*;
 use rand::RngExt;
+use tower_sessions_redis_store::fred::types::{Expiration, SetOptions};
 
 pub(super) async fn timezone_request(jar: CookieJar, request: Request, next: Next) -> Response {
     let timezone = jar
@@ -89,23 +90,44 @@ pub(super) async fn require_user(
     }
     match session.get::<WebUser>("user").await {
         Ok(Some(mut user)) => {
-            if channel_access_needs_refresh(&user, request.uri().path()) {
-                let channel_access = match accessible_channels(&data, user.id).await {
-                    Ok(channel_access) => channel_access,
-                    Err(error) => {
-                        error!("Discord permission refresh failed: {}", error);
-                        return StatusCode::BAD_GATEWAY.into_response();
+            match data.redis.get::<Option<String>, _>(format!("web-permissions:{}", user.id)).await {
+                Ok(Some(value)) => match serde_json::from_str::<(Vec<ChannelAccess>, u64)>(&value) {
+                    Ok((channel_access, refreshed_at)) if refreshed_at > user.channel_access_refreshed_at => {
+                        user.channel_ids = channel_access
+                            .iter()
+                            .map(|access| access.channel_id)
+                            .collect();
+                        user.channel_access = channel_access;
+                        user.channel_access_refreshed_at = refreshed_at;
+                        if let Err(error) = session.insert("user", &user).await {
+                            error!("Could not update refreshed session permissions: {}", error);
+                            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                        }
                     }
-                };
-                user.channel_ids = channel_access
-                    .iter()
-                    .map(|access| access.channel_id)
-                    .collect();
-                user.channel_access = channel_access;
-                user.channel_access_refreshed_at = unix_timestamp();
-                if let Err(error) = session.insert("user", &user).await {
-                    error!("Could not update refreshed session permissions: {}", error);
-                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    Ok(_) => {}
+                    Err(error) => error!("Could not decode refreshed session permissions: {}", error),
+                },
+                Ok(None) => {}
+                Err(error) => error!("Could not load refreshed session permissions: {}", error),
+            }
+            if channel_access_needs_refresh(&user, request.uri().path()) {
+                match claim_channel_access_refresh(&data.redis, user.id).await {
+                    Ok(true) => {
+                        let data = data.clone();
+                        let user_id = user.id;
+                        tokio::spawn(async move {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_secs(120),
+                                refresh_channel_access(&data, user_id),
+                            ).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => error!("Discord permission refresh failed: {}", error),
+                                Err(error) => error!("Discord permission refresh timed out: {}", error),
+                            }
+                        });
+                    }
+                    Ok(false) => {}
+                    Err(error) => error!("Could not start Discord permission refresh: {}", error),
                 }
             }
             if !request_is_allowed(&data.pool, &user, request.uri().path()).await {
@@ -553,6 +575,35 @@ pub(super) fn oauth_error(message: &str) -> Response {
     (StatusCode::BAD_GATEWAY, message.to_string()).into_response()
 }
 
+async fn claim_channel_access_refresh(
+    redis: &Pool,
+    user_id: i64,
+) -> Result<bool, tower_sessions_redis_store::fred::error::Error> {
+    redis.set::<Option<String>, _, _>(
+        format!("web-permissions-refresh:{user_id}"),
+        "1",
+        Some(Expiration::EX(CHANNEL_ACCESS_TTL_SECONDS as i64)),
+        Some(SetOptions::NX),
+        false,
+    ).await.map(|value| value.is_some())
+}
+
+async fn refresh_channel_access(
+    data: &WebData,
+    user_id: i64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let channel_access = accessible_channels(data, user_id).await?;
+    let value = serde_json::to_string(&(channel_access, unix_timestamp()))?;
+    data.redis.set::<(), _, _>(
+        format!("web-permissions:{user_id}"),
+        value,
+        Some(Expiration::EX(12 * 60 * 60)),
+        None,
+        false,
+    ).await?;
+    Ok(())
+}
+
 pub(super) async fn accessible_channels(
     data: &WebData,
     user_id: i64,
@@ -786,5 +837,44 @@ pub(super) fn apply_overwrite(
     if let Some(overwrite) = overwrite {
         *permissions &= !overwrite.deny.parse::<u64>().unwrap_or_default();
         *permissions |= overwrite.allow.parse::<u64>().unwrap_or_default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn claims_only_one_channel_access_refresh_across_connections() {
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            return;
+        };
+        let redis = Pool::new(Config::from_url(&redis_url).unwrap(), None, None, None, 4).unwrap();
+        let connection = redis.connect();
+        redis.wait_for_connect().await.unwrap();
+        let user_id = -(rand::random::<u32>() as i64) - 1;
+        let key = format!("web-permissions-refresh:{user_id}");
+        let mut tasks = Vec::new();
+        for _ in 0..64 {
+            let redis = redis.clone();
+            tasks.push(tokio::spawn(async move {
+                claim_channel_access_refresh(&redis, user_id).await.unwrap()
+            }));
+        }
+        let mut claims = 0;
+        for task in tasks {
+            claims += usize::from(task.await.unwrap());
+        }
+        let ttl = redis.ttl::<i64, _>(&key).await.unwrap();
+        let duplicate = claim_channel_access_refresh(&redis, user_id).await.unwrap();
+        redis.del::<i64, _>(&key).await.unwrap();
+        let retry = claim_channel_access_refresh(&redis, user_id).await.unwrap();
+        redis.del::<i64, _>(&key).await.unwrap();
+        redis.quit().await.unwrap();
+        connection.await.unwrap().unwrap();
+        assert_eq!(claims, 1);
+        assert!(!duplicate);
+        assert!(retry);
+        assert!((1..=CHANNEL_ACCESS_TTL_SECONDS as i64).contains(&ttl));
     }
 }

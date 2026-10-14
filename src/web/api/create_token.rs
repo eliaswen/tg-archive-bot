@@ -13,7 +13,7 @@ use super::*;
         (status = 503, body = ErrorResponse)
     )
 )]
-pub(super) async fn create_token(
+pub(in crate::web) async fn create_token(
     State(data): State<WebData>,
     session: Session,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,

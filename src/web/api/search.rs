@@ -5,38 +5,87 @@ pub(super) async fn search(
     user: &ApiUser,
     query: &SearchQuery,
     limit: &i64,
-    timestamp: bool,
+    r#type: SearchType,
 ) -> ApiResult<SearchResponse> {
     let limit = limit.max(&1);
     let pattern = format!("%{}%", query.q);
     let fields = parse_search_filter(query.filter.as_deref())?;
-
-    let results = sqlx::query_as::<_, MessageSummary>(
-        "SELECT m.message_id AS discord_id, m.author_id, m.author_username, m.guild_id AS server_id,
-         g.guild_name AS server_name, m.channel_id, c.channel_name, m.timestamp::text AS timestamp, m.content
-         FROM messages m
-         JOIN guilds g ON g.guild_id = m.guild_id
-         JOIN channels c ON c.channel_id = m.channel_id
-         WHERE CASE
-             WHEN $2 THEN m.timestamp::text ILIKE $1
-             ELSE COALESCE(m.content, '') ILIKE $1
-         END
-         AND (m.channel_id = ANY($3) OR m.author_id = $4)
-         AND ($6::bigint[] IS NULL OR m.guild_id = ANY($6))
-         AND ($7::bigint[] IS NULL OR m.channel_id = ANY($7))
-         ORDER BY m.timestamp DESC, m.message_id DESC
-         LIMIT $5"
-    )
-    .bind(&pattern)
-    .bind(timestamp)
-    .bind(&user.channel_ids)
-    .bind(user.discord_id)
-    .bind(limit)
-    .bind(query.server_scope.as_deref())
-    .bind(query.channel_scope.as_deref())
-    .fetch_all(&data.pool)
-    .await
-    .map_err(database)?;
+    let timestamp = matches!(r#type, SearchType::Timestamp);
+    let image = matches!(r#type, SearchType::Image);
+    // This is a mess
+    let results = if image {
+        if query.q.trim().is_empty() {
+            return Err(error(StatusCode::BAD_REQUEST, "Enter a search query for image search."));
+        }
+        let Some(encoder) = data.text_encoder.clone() else {
+            return Err(error(StatusCode::SERVICE_UNAVAILABLE, "image search unavailable"));
+        };
+        let permit = data.ml_semaphore.clone().acquire_owned().await
+            .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "image search unavailable"))?;
+        let search = query.q.clone();
+        let embedding = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            encoder.embed(&search)
+        }).await
+            .map_err(|error_value| {
+                tracing::error!("Could not run image search encoder: {}", error_value);
+                error(StatusCode::INTERNAL_SERVER_ERROR, "image search failed")
+            })?
+            .map_err(|error_value| {
+                tracing::error!("Could not encode image search query: {}", error_value);
+                error(StatusCode::SERVICE_UNAVAILABLE, "image search unavailable")
+            })?;
+        let embedding = pgvector::Vector::from(embedding);
+        sqlx::query_as::<_, MessageSummary>(
+            "SELECT m.message_id AS discord_id, m.author_id, m.author_username, m.guild_id AS server_id,
+             g.guild_name AS server_name, m.channel_id, c.channel_name, m.timestamp::text AS timestamp, m.content
+             FROM image_embeddings ie
+             JOIN messages m ON m.message_id = ie.message_id
+             JOIN guilds g ON g.guild_id = m.guild_id
+             JOIN channels c ON c.channel_id = m.channel_id
+             WHERE (m.channel_id = ANY($2) OR m.author_id = $3)
+             AND ($5::bigint[] IS NULL OR m.guild_id = ANY($5))
+             AND ($6::bigint[] IS NULL OR m.channel_id = ANY($6))
+             ORDER BY ie.embedding <=> $1, ie.message_id, ie.message_version, ie.attachment_id
+             LIMIT $4"
+        )
+        .bind(&embedding)
+        .bind(&user.channel_ids)
+        .bind(user.discord_id)
+        .bind(limit)
+        .bind(query.server_scope.as_deref())
+        .bind(query.channel_scope.as_deref())
+        .fetch_all(&data.pool)
+        .await
+        .map_err(database)?
+    } else {
+        sqlx::query_as::<_, MessageSummary>(
+            "SELECT m.message_id AS discord_id, m.author_id, m.author_username, m.guild_id AS server_id,
+             g.guild_name AS server_name, m.channel_id, c.channel_name, m.timestamp::text AS timestamp, m.content
+             FROM messages m
+             JOIN guilds g ON g.guild_id = m.guild_id
+             JOIN channels c ON c.channel_id = m.channel_id
+             WHERE CASE
+                 WHEN $2 THEN m.timestamp::text ILIKE $1
+                 ELSE COALESCE(m.content, '') ILIKE $1
+             END
+             AND (m.channel_id = ANY($3) OR m.author_id = $4)
+             AND ($6::bigint[] IS NULL OR m.guild_id = ANY($6))
+             AND ($7::bigint[] IS NULL OR m.channel_id = ANY($7))
+             ORDER BY m.timestamp DESC, m.message_id DESC
+             LIMIT $5"
+        )
+        .bind(&pattern)
+        .bind(timestamp)
+        .bind(&user.channel_ids)
+        .bind(user.discord_id)
+        .bind(limit)
+        .bind(query.server_scope.as_deref())
+        .bind(query.channel_scope.as_deref())
+        .fetch_all(&data.pool)
+        .await
+        .map_err(database)?
+    };
 
     let results = results
         .into_iter()
@@ -60,7 +109,7 @@ pub(super) async fn search(
     }))
 }
 
-fn parse_search_filter(
+pub(super) fn parse_search_filter(
     filter: Option<&str>,
 ) -> Result<[bool; 9], (StatusCode, Json<ErrorResponse>)> {
     let Some(filter) = filter else {

@@ -17,5 +17,5 @@ pub(super) async fn search_content(
     Extension(user): Extension<ApiUser>,
     Query(query): Query<SearchQuery>,
 ) -> ApiResult<SearchResponse> {
-    search(&data, &user, &query, &query.limit.unwrap_or(100), false).await
+    search(&data, &user, &query, &query.limit.unwrap_or(100), SearchType::Content).await
 }

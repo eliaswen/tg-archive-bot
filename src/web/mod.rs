@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod handlers;
+mod pages;
 
 use askama::Template;
 use axum::{
@@ -32,6 +33,7 @@ use utoipa::OpenApi;
 pub use crate::archive_stats::format_bytes;
 use auth::*;
 use handlers::*;
+use pages::*;
 
 fn openapi() -> String {
     api::ApiDoc::openapi().to_pretty_json().unwrap()
@@ -673,6 +675,7 @@ pub async fn run(
     };
     let archive = Router::new()
         .route("/", get(index))
+        .route("/api-tokens", get(api_tokens).post(generate_api_token))
         .route("/servers", get(servers).post(search_servers))
         .route("/servers/{server_id}", get(server))
         .route(
@@ -835,6 +838,7 @@ fn sensitive_request(method: &Method, path: &str) -> bool {
     }
 
     path == "/"
+        || path == "/api-tokens"
         || path == "/privacy/anonymize"
         || path == "/login/discord"
         || path.starts_with("/login/discord/")

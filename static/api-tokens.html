@@ -1,0 +1,15 @@
+<h2>Create API token</h2>
+{% if let Some(token) = token %}
+<p>Your API token will not be shown again.</p>
+<label>API token <input type="text" value="{{token}}" readonly size="64" autocomplete="off"></label>
+{% endif %}
+{% if let Some(error) = error %}
+<p role="alert">{{error}}</p>
+{% endif %}
+<form method="post" action="/api-tokens">
+    <input type="hidden" name="csrf_token" value="{{csrf_token}}">
+    <p>Limits use your timezone: ({{timezone}}). Leave them blank for no limit.</p>
+    <p><label>Valid from <input type="datetime-local" name="valid_from" step="1"></label></p>
+    <p><label>Valid until <input type="datetime-local" name="valid_to" step="1"></label></p>
+    <button type="submit">Create token</button>
+</form>
