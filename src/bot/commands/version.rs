@@ -7,6 +7,7 @@ const VERSION: &str = include_str!(concat!(env!("OUT_DIR"), "/version.txt"));
 /// Get the bot's current version
 #[poise::command(slash_command, prefix_command)]
 pub async fn version(ctx: Context<'_>) -> Result<(), Error> {
+    let start_time = std::time::Instant::now();
     trace!(
         "version command called by user {} in guild {}",
         ctx.author().id.get(),
@@ -26,5 +27,12 @@ pub async fn version(ctx: Context<'_>) -> Result<(), Error> {
         "Version command performed for user {} with version information",
         ctx.author().name
     );
+    let time_taken = start_time.elapsed();
+    let msg = format!(
+        "{}\n*Processed command in {:?}*",
+        &msg,
+        time_taken
+    );
+    edit_response_message(&response, ctx, &msg, true).await?;
     Ok(())
 }

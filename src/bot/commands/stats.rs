@@ -5,6 +5,7 @@ use tracing::{debug, trace};
 #[doc = "Show archive statistics"]
 #[poise::command(slash_command, prefix_command)]
 pub async fn stats(ctx: Context<'_>) -> Result<(), Error> {
+    let start_time = std::time::Instant::now();
     trace!(
         "stats command called by user {} in guild {}",
         ctx.author().id.get(),
@@ -30,6 +31,7 @@ pub async fn stats(ctx: Context<'_>) -> Result<(), Error> {
     );
 
     edit_response_message(&response, ctx, &msg, true).await?;
+
     trace_message(
         &msg,
         ctx.channel_id().to_string(),
@@ -37,5 +39,12 @@ pub async fn stats(ctx: Context<'_>) -> Result<(), Error> {
     )
     .await;
     debug!("Stats command performed for user {}", ctx.author().name);
+    let time_taken = start_time.elapsed();
+    let msg = format!(
+        "{}\n*Processed command in {:?}*",
+        &msg,
+        time_taken
+    );
+    edit_response_message(&response, ctx, &msg, true).await?;
     Ok(())
 }
