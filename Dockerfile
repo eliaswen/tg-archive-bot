@@ -1,7 +1,16 @@
-FROM rust:1.97-bookworm AS builder
+FROM rust:1.97-bookworm AS chef
+RUN cargo install --locked cargo-chef
 WORKDIR /usr/src/tg-archive-bot
+
+FROM chef AS planner
 COPY . .
-RUN SQLX_OFFLINE=true cargo install --locked --path .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /usr/src/tg-archive-bot/recipe.json recipe.json
+RUN SQLX_OFFLINE=true cargo chef cook --release --locked --recipe-path recipe.json
+COPY . .
+RUN SQLX_OFFLINE=true CARGO_TARGET_DIR=/usr/src/tg-archive-bot/target cargo install --locked --path .
 
 FROM debian:bookworm-slim AS cpu-runtime
 RUN apt-get update && apt-get install -y ca-certificates curl libgomp1 tar && \

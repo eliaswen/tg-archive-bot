@@ -53,6 +53,9 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Run tests
         run: cargo test
 
@@ -136,6 +139,8 @@ jobs:
         with:
           context: .
           target: cpu-runtime
+          cache-from: type=gha,scope=cpu
+          cache-to: type=gha,mode=max,scope=cpu
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -145,6 +150,8 @@ jobs:
         with:
           context: .
           target: cuda-runtime
+          cache-from: type=gha,scope=ml
+          cache-to: type=gha,mode=max,scope=ml
           push: true
           tags: ${{ steps.meta_ml.outputs.tags }}
           labels: ${{ steps.meta_ml.outputs.labels }}
