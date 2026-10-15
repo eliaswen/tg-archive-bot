@@ -18,7 +18,7 @@ pub type Context<'a> = poise::Context<'a, Data, Error>;
 
 #[tokio::main]
 async fn main() {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     let log_level = env::var("TG_BOT_LOG").unwrap_or_else(|_| "info".to_string());
     let filter = EnvFilter::new(format!("tg_archive_bot={}", log_level));

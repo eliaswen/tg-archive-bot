@@ -192,7 +192,8 @@ pub async fn load_text_encoder() -> Result<TextEncoder, Error> {
     let tokenizer_path = tokenizer_file().await?;
     let tokenizer = Tokenizer::from_file(tokenizer_path)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let session = Session::builder()?.commit_from_file(model)?;
+    // TODO: Use a shared enviroment for text and image encoders because supposedly that's better
+    let session = Session::builder(&ort::init().build()?)?.commit_from_file(model)?;
     validate_session(&session, &["input_ids"], "pooler_output")?;
     Ok(TextEncoder {
         session: Mutex::new(session),
@@ -225,12 +226,13 @@ pub async fn load_image_encoder() -> Result<ImageEncoder, Error> {
         3 => FilterType::CatmullRom,
         _ => return Err(std::io::Error::other("unsupported SigLIP image resampling mode").into()),
     };
-    if !CUDA::default().is_available()? {
+    if !CUDA::is_available()? {
         return Err(
             std::io::Error::other("ONNX Runtime CUDA execution provider is unavailable").into(),
         );
     }
-    let session = Session::builder()?
+    // TODO: Use a shared enviroment for text and image encoders because supposedly that's better
+    let session = Session::builder(&ort::init().build()?)?
         .with_execution_providers([CUDA::default().build()])
         .map_err(|error| std::io::Error::other(error.to_string()))?
         .commit_from_file(model)?;

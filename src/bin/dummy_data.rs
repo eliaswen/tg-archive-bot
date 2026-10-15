@@ -11,7 +11,7 @@ const ZAP_USER_ID: i64 = 9_000_000_000_000_000_001;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     let database_url =
         env::var("TG_BOT_DATABASE_URL").expect("Expected a database url in the environment");
