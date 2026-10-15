@@ -86,16 +86,32 @@ pub fn format_bytes(bytes: i64) -> String {
 
 pub fn format_duration(seconds: i64) -> String {
     let seconds = seconds.max(0);
-    let days = seconds / 86_400;
+    // This technically isn't perfectly accurate for months and years, since it uses the average length of a month and year
+    // (30.436875 days and 365.2425 days respectively), but it's the easiest way to do it without making it way more complicated
+    // TODO at some point later in the far future when I'm less lazy: make this more accurate
+    let years = seconds / 31_556_952;
+    let months = seconds % 31_536_000 / 2_592_000;
+    let days = seconds % 31_536_000 % 2_592_000 / 86_400;
     let hours = seconds % 86_400 / 3_600;
     let minutes = seconds % 3_600 / 60;
     let seconds = seconds % 60;
+
+    let year_unit = if years == 1 { "year" } else { "years" };
+    let month_unit = if months == 1 { "month" } else { "months" };
     let day_unit = if days == 1 { "day" } else { "days" };
     let hour_unit = if hours == 1 { "hour" } else { "hours" };
     let minute_unit = if minutes == 1 { "minute" } else { "minutes" };
     let second_unit = if seconds == 1 { "second" } else { "seconds" };
 
-    if days > 0 {
+    if years > 0 {
+        format!(
+            "{years} {year_unit}, {months} {month_unit}, {days} {day_unit}, {hours} {hour_unit}, {minutes} {minute_unit}, {seconds} {second_unit}"
+        )
+    } else if months > 0 {
+        format!(
+            "{months} {month_unit}, {days} {day_unit}, {hours} {hour_unit}, {minutes} {minute_unit}, {seconds} {second_unit}"
+        )
+    } else if days > 0 {
         format!(
             "{days} {day_unit}, {hours} {hour_unit}, {minutes} {minute_unit}, {seconds} {second_unit}"
         )
