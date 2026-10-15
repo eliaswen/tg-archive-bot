@@ -1,7 +1,8 @@
+use axum::response::sse::KeepAlive;
 use poise::serenity_prelude as sere;
 use std::env;
 use std::sync::{Arc, atomic::AtomicBool};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::EnvFilter;
 mod archive_stats;
 mod bot;
@@ -20,7 +21,7 @@ pub type Context<'a> = poise::Context<'a, Data, Error>;
 async fn main() {
     dotenvy::dotenv().ok();
 
-    let log_level = env::var("TG_BOT_LOG").unwrap_or_else(|_| "info".to_string());
+    let log_level = load_env_var("TG_BOT_LOG", false, "info");
     let filter = EnvFilter::new(format!("tg_archive_bot={}", log_level));
 
     tracing_subscriber::fmt()
@@ -44,8 +45,7 @@ async fn main() {
     }
 
     trace!("Loading database url");
-    let database_url =
-        env::var("TG_BOT_DATABASE_URL").expect("Expected a database url in the environment");
+    let database_url = load_env_var("TG_BOT_DATABASE_URL", true, "");
     trace!("Database url loaded");
 
     debug!("Initalizing database");
@@ -77,16 +77,33 @@ async fn main() {
     run_bot(pool).await;
 }
 
+fn load_env_var(key: &str, required: bool, default: &str) -> String {
+    env::var(key).unwrap_or_else(|_| {
+        let key_file = format!("{}_FILE", key);
+        let path = env::var(&key_file).unwrap_or_else(|_| {
+            if required {
+                error!("Expected either {} or {} in the environment", key, key_file);
+                std::process::exit(1);
+            } else { warn!("Could not find environment variable {}, using default value", key); default.to_string() }
+        });
+        std::fs::read_to_string(path).unwrap_or_else(|_| {
+            if required {
+                error!("Expected either {} or {} in the environment", key, key_file);
+                std::process::exit(1);
+            } else {
+                warn!("Failed to read {} from file, using default value", key_file);
+                default.to_string() }
+        })
+    })
+}
+
 async fn run_web(pool: sqlx::PgPool) {
-    let token = env::var("TG_BOT_DISCORD_TOKEN").expect("Expected a token in the environment");
-    let web_address = env::var("TG_BOT_WEB_ADDRESS").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
-    let redis_url = env::var("TG_BOT_REDIS_URL").expect("Expected a Redis URL in the environment");
-    let discord_client_id = env::var("TG_BOT_DISCORD_CLIENT_ID")
-        .expect("Expected a Discord client ID in the environment");
-    let discord_client_secret = env::var("TG_BOT_DISCORD_CLIENT_SECRET")
-        .expect("Expected a Discord client secret in the environment");
-    let discord_redirect_uri = env::var("TG_BOT_DISCORD_REDIRECT_URI")
-        .expect("Expected a Discord redirect URI in the environment");
+    let token = load_env_var("TG_BOT_DISCORD_TOKEN", true, "");
+    let web_address = load_env_var("TG_BOT_WEB_ADDRESS", false, "0.0.0.0:3000");
+    let redis_url = load_env_var("TG_BOT_REDIS_URL", true, "");
+    let discord_client_id = load_env_var("TG_BOT_DISCORD_CLIENT_ID", true, "");
+    let discord_client_secret = load_env_var("TG_BOT_DISCORD_CLIENT_SECRET", true, "");
+    let discord_redirect_uri = load_env_var("TG_BOT_DISCORD_REDIRECT_URI", true, "");
 
     debug!("Starting web server on {}", web_address);
     let web_listener = tokio::net::TcpListener::bind(&web_address)
@@ -104,7 +121,7 @@ async fn run_web(pool: sqlx::PgPool) {
 }
 
 async fn run_bot(pool: sqlx::PgPool) {
-    let token = env::var("TG_BOT_DISCORD_TOKEN").expect("Expected a token in the environment");
+    let token = load_env_var("TG_BOT_DISCORD_TOKEN", true, "");
     info!("Starting bot...");
     let jobs_pool = pool.clone();
 
