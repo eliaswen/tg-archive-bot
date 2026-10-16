@@ -275,6 +275,10 @@ struct MessageResponse {
 }
 #[derive(Serialize, sqlx::FromRow)]
 struct MessageSummary {
+    #[sqlx(default)]
+    message_version: Option<i64>,
+    #[sqlx(default)]
+    attachment_id: Option<i64>,
     discord_id: i64,
     author_id: i64,
     author_username: String,
@@ -287,6 +291,10 @@ struct MessageSummary {
 }
 #[derive(Serialize, ToSchema)]
 struct FilteredMessageSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_version: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attachment_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     discord_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

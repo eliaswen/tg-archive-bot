@@ -130,6 +130,9 @@ pub(super) async fn require_user(
                     Err(error) => error!("Could not start Discord permission refresh: {}", error),
                 }
             }
+            if channel_access_expired_at(&user, unix_timestamp()) {
+                return (StatusCode::SERVICE_UNAVAILABLE, "Could not verify current Discord permissions. Please try again shortly.").into_response();
+            }
             if !request_is_allowed(&data.pool, &user, request.uri().path()).await {
                 return StatusCode::NOT_FOUND.into_response();
             }
@@ -149,6 +152,10 @@ pub(super) fn unix_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+pub(super) fn channel_access_expired_at(user: &WebUser, now: u64) -> bool {
+    now.saturating_sub(user.channel_access_refreshed_at) >= 15 * 60
 }
 
 pub(super) fn channel_access_needs_refresh_at(user: &WebUser, path: &str, now: u64) -> bool {

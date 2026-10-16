@@ -118,7 +118,10 @@ pub(super) async fn server(
     .await
     .map_err(database_error)?;
     let icons = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT guild_icon_url, MIN(first_seen_at)::text, MAX(last_seen_at)::text
+        "SELECT COALESCE(
+             (ARRAY_AGG('/icons/' || uuid::text ORDER BY image_available DESC NULLS LAST, last_seen_at DESC)
+                 FILTER (WHERE image_available = true))[1], guild_icon_url),
+             MIN(first_seen_at)::text, MAX(last_seen_at)::text
          FROM guild_history
          WHERE guild_id = $1 AND guild_icon_url IS NOT NULL
          GROUP BY guild_icon_url
@@ -338,7 +341,10 @@ pub(super) async fn render_servers(
     .map_err(database_error)?;
     let pagination = Pagination::new(requested_page, item_count);
     let servers = sqlx::query_as::<_, (i64, String, Option<String>)>(
-        "SELECT guild_id, guild_name, guild_icon_url
+        "SELECT guild_id, guild_name, COALESCE(
+             (SELECT '/icons/' || h.uuid::text FROM guild_history h
+              WHERE h.guild_id = guilds.guild_id AND h.guild_icon_url = guilds.guild_icon_url
+                AND h.image_available = true ORDER BY h.last_seen_at DESC LIMIT 1), guild_icon_url)
          FROM guilds
          WHERE (guild_name ILIKE $1 OR guild_id::text ILIKE $1)
            AND EXISTS(SELECT 1 FROM channels c WHERE c.guild_id = guilds.guild_id AND c.channel_id = ANY($2))
@@ -715,6 +721,42 @@ pub(super) async fn avatar(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(error) => {
             error!("Database error while loading avatar: {}", error);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub(super) async fn icon(
+    State(data): State<WebData>,
+    Path(icon_id): Path<String>,
+) -> Response {
+    let Ok(icon_id) = sqlx::types::Uuid::parse_str(&icon_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let icon = sqlx::query_as::<_, (Vec<u8>, Option<String>)>(
+        "SELECT image_data, image_mimetype
+         FROM guild_history
+         WHERE uuid = $1 AND image_checked = true AND image_available = true;",
+    )
+    .bind(icon_id)
+    .fetch_optional(&data.pool)
+    .await;
+
+    match icon {
+        Ok(Some((image_data, image_mimetype))) => {
+            let content_type = image_mimetype.unwrap_or_else(|| "application/octet-stream".into());
+            (
+                [
+                    (header::CONTENT_TYPE, content_type),
+                    (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
+                ],
+                image_data,
+            )
+                .into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => {
+            error!("Database error while loading icon: {}", error);
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

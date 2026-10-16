@@ -698,6 +698,7 @@ pub async fn run(
         .route("/messages/{message_id}", get(message))
         .route("/attachments/{attachment_id}", get(attachment))
         .route("/avatars/{avatar_id}", get(avatar))
+        .route("/icons/{icon_id}", get(icon))
         .route(
             "/privacy/anonymize",
             get(anonymize_confirmation).post(anonymize_all),
@@ -1479,6 +1480,20 @@ mod tests {
                 assert!(!csrf_token_is_valid("wrong-token"));
             })
             .await;
+    }
+
+    #[test]
+    fn rejects_channel_access_at_the_hard_expiry() {
+        let user = WebUser {
+            id: 1,
+            username: "test".into(),
+            channel_ids: vec![2],
+            channel_access: Vec::new(),
+            channel_access_refreshed_at: 1_000,
+        };
+        assert!(!channel_access_expired_at(&user, 1_899));
+        assert!(channel_access_expired_at(&user, 1_900));
+        assert!(channel_access_expired_at(&user, 10_000));
     }
 
     #[test]

@@ -201,13 +201,23 @@ async fn record_message_version(
         .ok_or_else(|| std::io::Error::other("Guild message belonged to a private channel"))?;
 
     let mut downloaded_attachments = Vec::with_capacity(message.attachments.len());
+    let mut archive_incomplete = false;
     for attachment in &message.attachments {
         trace!(
             "Downloading attachment {} from message {}",
             attachment.id.get(),
             message.id.get()
         );
-        downloaded_attachments.push((attachment, attachment.download().await?));
+        match attachment.download().await {
+            Ok(data) => downloaded_attachments.push((attachment, data)),
+            Err(error) => {
+                error!(
+                    "Could not download attachment {} from message {}: {}",
+                    attachment.id, message.id, error
+                );
+                archive_incomplete = true;
+            }
+        }
     }
 
     let guild_id = guild_id.get() as i64;
@@ -370,12 +380,13 @@ async fn record_message_version(
         "UPDATE messages
          SET archive_incomplete = TRUE
          WHERE message_id = $1
-           AND EXISTS(
+           AND ($2 OR EXISTS(
                SELECT 1 FROM archive_queue
                WHERE message_id = $1 AND failed_at IS NOT NULL
-           )",
+           ))",
     )
     .bind(message_id)
+    .bind(archive_incomplete)
     .execute(&mut *transaction)
     .await?;
 

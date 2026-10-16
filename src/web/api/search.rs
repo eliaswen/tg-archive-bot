@@ -38,8 +38,9 @@ pub(super) async fn search(
         let embedding = pgvector::Vector::from(embedding);
         sqlx::query_as::<_, MessageSummary>(
             "SELECT m.message_id AS discord_id, m.author_id, m.author_username, m.guild_id AS server_id,
-             g.guild_name AS server_name, m.channel_id, c.channel_name, m.timestamp::text AS timestamp, m.content
+             g.guild_name AS server_name, m.channel_id, c.channel_name, m.timestamp::text AS timestamp, mv.content, ie.message_version, ie.attachment_id
              FROM image_embeddings ie
+             JOIN message_versions mv ON mv.message_id = ie.message_id AND mv.version = ie.message_version
              JOIN messages m ON m.message_id = ie.message_id
              JOIN guilds g ON g.guild_id = m.guild_id
              JOIN channels c ON c.channel_id = m.channel_id
@@ -90,7 +91,9 @@ pub(super) async fn search(
     let results = results
         .into_iter()
         .map(|result| FilteredMessageSummary {
-            discord_id: fields[0].then_some(result.discord_id),
+            message_version: result.message_version,
+            attachment_id: result.attachment_id,
+            discord_id: (image || fields[0]).then_some(result.discord_id),
             author_id: fields[1].then_some(result.author_id),
             author_username: fields[2].then_some(result.author_username),
             server_id: fields[3].then_some(result.server_id),
