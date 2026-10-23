@@ -742,7 +742,7 @@ pub async fn run(
         HeaderValue::from_static("same-origin"),))
         .layer(set_header::SetResponseHeaderLayer::overriding(
         HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://cdn.discordapp.com; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';"),))
+        HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' https://cdn.discordapp.com; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self' https://discord.com; frame-ancestors 'none';"),))
         .layer(set_header::SetResponseHeaderLayer::overriding(
         HeaderName::from_static("x-frame-options"),
         HeaderValue::from_static("deny"),))
