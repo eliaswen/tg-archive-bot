@@ -1,6 +1,5 @@
 mod api;
 mod auth;
-mod handlers;
 mod pages;
 
 use askama::Template;
@@ -32,7 +31,6 @@ use utoipa::OpenApi;
 
 pub use crate::archive_stats::format_bytes;
 use auth::*;
-use handlers::*;
 use pages::*;
 
 fn openapi() -> String {
