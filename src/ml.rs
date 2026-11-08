@@ -305,9 +305,9 @@ fn check_onnx_runtime() -> Result<(), Error> {
     let version = unsafe { CStr::from_ptr(((*api_base).get_version_string)()) }
         .to_string_lossy()
         .into_owned();
-    if !version.starts_with("1.28.") {
+    if !version.starts_with("1.31.") {
         return Err(std::io::Error::other(format!(
-            "ONNX Runtime 1.28 is required, found {version}"
+            "ONNX Runtime 1.31 is required, found {version}"
         ))
         .into());
     }
